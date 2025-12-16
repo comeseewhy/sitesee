@@ -1,0 +1,11 @@
+html, body { height: 100%; margin: 0; }
+#topbar {
+  padding: 10px;
+  border-bottom: 1px solid #ddd;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+#searchInput { flex: 1; min-width: 220px; padding: 8px; }
+button, select { padding: 8px; }
+#status { font-size: 13px; color: #444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#map { height: calc(100% - 110px); }
