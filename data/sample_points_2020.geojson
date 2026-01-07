@@ -1,7 +1,0 @@
-{
-  "type": "FeatureCollection",
-  "features": [
-    { "type": "Feature", "properties": { "year": 2020 }, "geometry": { "type": "Point", "coordinates": [-80.30, 42.83] } },
-    { "type": "Feature", "properties": { "year": 2020 }, "geometry": { "type": "Point", "coordinates": [-80.35, 42.90] } }
-  ]
-}
