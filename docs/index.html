@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SnowBridge</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Leaflet (NO integrity during early deploy/debug; avoids silent blocking) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <!-- App styles -->
+  <link rel="stylesheet" href="./styles.css" />
+
+  <!-- Safety: map never collapses even if styles.css fails -->
+  <style>
+    :root { --topbar-h: 52px; }
+    #map { height: calc(100vh - var(--topbar-h)); width: 100%; }
+    /* Safety: keep suggestions above Leaflet panes */
+    #addrSuggest { position: absolute; z-index: 9999; }
+  </style>
+</head>
+
+<body>
+  <!-- TOP BAR : single-line control surface -->
+  <div id="topbar">
+    <input
+      id="addrInput"
+      type="text"
+      placeholder="Search Waterford address…"
+      autocomplete="off"
+      inputmode="text"
+      aria-label="Search address"
+    />
+
+    <button id="addrBtn" type="button" aria-label="Search">Go</button>
+
+    <label class="toggle" title="Toggle between parcel boundary and snow zone (+8m buffer)">
+      <input id="modeToggle" type="checkbox" />
+      Snow zone
+    </label>
+
+    <label class="toggle" title="Toggle satellite imagery (View will mask it to +8m snow zone)">
+      <input id="satToggle" type="checkbox" />
+      Satellite
+    </label>
+
+    <span id="status" aria-live="polite">Loading…</span>
+  </div>
+
+  <!-- MAP -->
+  <div id="map" role="application" aria-label="Map"></div>
+
+  <!-- Libraries -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- App logic -->
+  <!-- IMPORTANT: this must match your filename in /docs (app.js vs apps.js). -->
+  <script src="./app.js"></script>
+
+  <noscript>
+    <div style="padding:10px;font-family:system-ui,Arial,sans-serif;">
+      SnowBridge needs JavaScript enabled to load the map.
+    </div>
+  </noscript>
+</body>
+</html>
