@@ -1,0 +1,219 @@
+/* ================================
+   SnowBridge — UI Styles (updated)
+   Calm • Clear • Community-first
+   - Single-line control bar
+   - Bulletproof map height
+   - Mobile-first adjustments
+   - Minimal Leaflet polish
+   ================================ */
+
+/* Reset / base */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --topbar-h: 52px;
+
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+
+  --text: #1f2937;
+  --muted: #4b5563;
+  --placeholder: #9ca3af;
+
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+
+  --focus: rgba(96, 165, 250, 0.28);
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+/* ================================
+   Top control bar (single line)
+   ================================ */
+
+#topbar {
+  height: var(--topbar-h);
+
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 6px 10px;
+
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* Address input */
+#addrInput {
+  flex: 1 1 auto;
+  min-width: 140px;
+
+  padding: 8px 10px;
+
+  font-size: 14px;
+  color: var(--text);
+
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+
+  background: #fff;
+  outline: none;
+}
+
+#addrInput::placeholder {
+  color: var(--placeholder);
+}
+
+#addrInput:focus {
+  border-color: #60a5fa;
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+/* Button */
+#addrBtn {
+  flex: 0 0 auto;
+
+  padding: 8px 12px;
+  font-size: 14px;
+
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+
+  background: #f9fafb;
+  color: #111827;
+
+  cursor: pointer;
+}
+
+#addrBtn:hover {
+  background: #f3f4f6;
+}
+
+#addrBtn:active {
+  background: #e5e7eb;
+}
+
+#addrBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+/* Toggle labels */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  padding: 6px 8px;
+  border-radius: 8px;
+
+  user-select: none;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  background: #f9fafb;
+}
+
+.toggle input {
+  cursor: pointer;
+}
+
+/* Status line (always 1 line) */
+#status {
+  margin-left: auto;
+
+  flex: 0 1 auto;
+  max-width: 42%;
+
+  font-size: 13px;
+  color: var(--muted);
+
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ================================
+   Map container (bulletproof)
+   ================================ */
+
+/* Use viewport height so map never collapses even if html/body sizing is quirky */
+#map {
+  height: calc(100vh - var(--topbar-h));
+  width: 100%;
+}
+
+/* ================================
+   Leaflet polish (minimal)
+   ================================ */
+
+.leaflet-container {
+  background: #e5e7eb;
+}
+
+/* Slightly softer controls without fighting Leaflet */
+.leaflet-control-zoom {
+  border: 1px solid var(--border-strong);
+  box-shadow: none;
+}
+
+.leaflet-control-zoom a {
+  color: #111827;
+}
+
+.leaflet-control-attribution {
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+/* ================================
+   Mobile adjustments
+   ================================ */
+
+@media (max-width: 640px) {
+  #topbar {
+    gap: 6px;
+    padding: 6px;
+  }
+
+  #addrInput {
+    min-width: 0;
+  }
+
+  #addrBtn {
+    padding: 8px 10px;
+  }
+
+  /* Map first on small screens */
+  #status {
+    display: none;
+  }
+
+  /* Keep toggles compact */
+  .toggle {
+    padding: 6px 6px;
+  }
+}
