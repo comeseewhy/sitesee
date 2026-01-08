@@ -1,5 +1,6 @@
 import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } from "./js/core/storage.js";
 import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
+import { createState } from "./js/core/state.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -44,6 +45,11 @@ import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.j
     hardFail("Missing #map element in index.html");
     return;
   }
+
+  // -----------------------------
+  // State (moved to core/state.js)
+  // -----------------------------
+  const state = createState();
 
   // -----------------------------
   // Utility
@@ -643,54 +649,6 @@ import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.j
   }
 
   // -----------------------------
-  // Map state
-  // -----------------------------
-  const state = {
-    cfg: null,
-    map: null,
-
-    basemap: null,
-    satellite: null,
-
-    parcelsLayer: null,
-    snowLayer: null,
-
-    parcelByRoll: new Map(),
-    snowByRoll: new Map(),
-
-    addresses: [],
-
-    selectedRoll: null,
-    isQueryStage: false,
-
-    // blinking
-    blinkTimer: null,
-    blinkOn: false,
-
-    // overlays
-    maskLayer: null,
-    snowOutlineLayer: null,
-    sizeOutlineLayer: null,
-    sizeLabelMarker: null,
-
-    // ui
-    suggestBox: null,
-    suggestIndex: -1,
-    ctxMenu: null,
-    panel: null,
-
-    // drawing
-    canvas: null,
-    drawEnabled: false,
-    hasUnsavedDrawing: false,
-    _drawHandlers: null,
-
-    // toggles in panel
-    satOn: false,
-    sizeOn: false,
-  };
-
-  // -----------------------------
   // Styling
   // -----------------------------
   const STYLE = {
@@ -891,11 +849,15 @@ import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.j
   // -----------------------------
   function clearSizeOverlays() {
     if (state.sizeOutlineLayer) {
-      try { state.map.removeLayer(state.sizeOutlineLayer); } catch {}
+      try {
+        state.map.removeLayer(state.sizeOutlineLayer);
+      } catch {}
       state.sizeOutlineLayer = null;
     }
     if (state.sizeLabelMarker) {
-      try { state.map.removeLayer(state.sizeLabelMarker); } catch {}
+      try {
+        state.map.removeLayer(state.sizeLabelMarker);
+      } catch {}
       state.sizeLabelMarker = null;
     }
   }
@@ -934,11 +896,15 @@ import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.j
   // -----------------------------
   function clearViewOverlays() {
     if (state.maskLayer) {
-      try { state.map.removeLayer(state.maskLayer); } catch {}
+      try {
+        state.map.removeLayer(state.maskLayer);
+      } catch {}
       state.maskLayer = null;
     }
     if (state.snowOutlineLayer) {
-      try { state.map.removeLayer(state.snowOutlineLayer); } catch {}
+      try {
+        state.map.removeLayer(state.snowOutlineLayer);
+      } catch {}
       state.snowOutlineLayer = null;
     }
   }
