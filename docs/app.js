@@ -1,12 +1,10 @@
-/* SnowBridge — app.js (merged, updated)
-   Goals:
-   1) Always show basemap + parcels, centered to data bounds.
-   2) Address autocomplete from addresses.full_addr (~2000 rows).
-   3) Click/select parcel → active highlight + zoom; second click → tighter zoom.
-   4) Store parcel → green stored highlight (ready for Draw/Save later).
-   5) View → satellite limited to +8m parcel boundary.
-   6) Draw → stub for later Leaflet.draw.
-   7) Hardening + better ranking + keyboard nav + further zoom.
+/* SnowBridge — app.js (new interaction model)
+   - Overview: address enter / left click / right click(View) enters "Query" stage
+   - Query stage: zoom + slow blinking active parcel
+   - Second left-click on active parcel opens draggable/resizable panel:
+       View Size (area), View Satellite (masked to +8m), Draw (spray), Save/View/Delete Snowbridge, Request
+   - Severity coloring persists (localStorage) and appears on overview
+   - Removes reliance on Satellite toggle + Snow zone toggle (those should be removed from index.html)
 */
 
 (() => {
@@ -21,8 +19,6 @@
     map: $("map"),
     addrInput: $("addrInput"),
     addrBtn: $("addrBtn"),
-    modeToggle: $("modeToggle"), // unused in this version
-    satToggle: $("satToggle"),   // manual satellite toggle
     status: $("status"),
     topbar: $("topbar"),
   };
@@ -37,7 +33,6 @@
     setStatus(`Error: ${msg}`);
   }
 
-  // Ensure Leaflet loaded
   if (typeof L === "undefined") {
     hardFail("Leaflet failed to load (L is undefined). Check Leaflet <script> tag.");
     return;
@@ -48,17 +43,23 @@
   }
 
   // -----------------------------
-  // Config loading (optional)
+  // Config
   // -----------------------------
   const FALLBACK_CFG = {
-    map: { maxZoom: 22, minZoom: 11, fitPaddingPx: 20 }, // extended maxZoom
+    map: {
+      startView: { lat: 42.93, lng: -80.28, zoom: 14 },
+      minZoom: 11,
+      maxZoom: 22,
+      fitPaddingPx: 20,
+      satelliteEnableMinZoom: 16,
+      queryZoom: 19,
+    },
     data: {
       joinKey: "ROLLNUMSHO",
       files: {
-        addresses: "../data/SnowBridge_addresses_4326.geojson",
-        parcels: "../data/SnowBridge_parcels_4326.geojson",
-        snowZone: "../data/SnowBridge_parcels_+8m_4326.geojson",
-        centroids: "../data/SnowBridge_centroids_4326.geojson",
+        addresses: "./SnowBridge_addresses_4326.geojson",
+        parcels: "./SnowBridge_parcels_4326.geojson",
+        snowZone: "./SnowBridge_parcels_+8m_4326.geojson",
       },
     },
     basemaps: {
@@ -93,17 +94,8 @@
   }
 
   // -----------------------------
-  // Utility: bounds + geometry
+  // Utility
   // -----------------------------
-  function unionBounds(boundsList) {
-    let out = null;
-    for (const b of boundsList) {
-      if (!b) continue;
-      out = out ? out.extend(b) : b;
-    }
-    return out;
-  }
-
   function normalizeAddr(s) {
     return String(s ?? "")
       .toUpperCase()
@@ -112,15 +104,12 @@
       .trim();
   }
 
-  // Tokenization helper for ranking
   function tokenizeNorm(norm) {
     return norm.split(" ").filter(Boolean);
   }
 
-  // Scoring for address suggestions (exact > prefix > token-prefix > contains)
   function scoreAddressCandidate(qNorm, candNorm) {
     if (!qNorm || !candNorm) return -Infinity;
-
     if (candNorm === qNorm) return 1000;
     if (candNorm.startsWith(qNorm)) return 800;
 
@@ -128,7 +117,6 @@
     const cTokens = tokenizeNorm(candNorm);
 
     let score = 0;
-
     for (const qt of qTokens) {
       if (!qt) continue;
       let best = 0;
@@ -139,41 +127,36 @@
       }
       score += best;
     }
-
     if (candNorm.includes(qNorm)) score += 120;
-
     return score;
   }
 
-  // Convert GeoJSON Polygon/MultiPolygon -> array of rings as LatLngs
   function polygonLatLngRingsFromGeoJSON(geom) {
     if (!geom) return null;
-
     const toLatLngRing = (ring) => ring.map(([lng, lat]) => [lat, lng]);
 
-    if (geom.type === "Polygon") {
-      return geom.coordinates.map(toLatLngRing);
-    }
-
-    if (geom.type === "MultiPolygon") {
-      return geom.coordinates.map((poly) => poly.map(toLatLngRing));
-    }
-
+    if (geom.type === "Polygon") return geom.coordinates.map(toLatLngRing);
+    if (geom.type === "MultiPolygon") return geom.coordinates.map((poly) => poly.map(toLatLngRing));
     return null;
   }
 
-  // Outside mask builder
-  function createOutsideMaskForPolygonRings(polygonRings) {
+  function createOutsideMaskFromGeom(geom, ringsOrPolys) {
     const outerWorld = [
       [85, -180],
       [85, 180],
       [-85, 180],
       [-85, -180],
     ];
+
     const holes = [];
-    if (polygonRings && polygonRings[0] && polygonRings[0].length) {
-      holes.push(polygonRings[0]);
+    if (geom.type === "Polygon") {
+      if (ringsOrPolys?.[0]?.length) holes.push(ringsOrPolys[0]);
+    } else {
+      for (const rings of ringsOrPolys || []) {
+        if (rings?.[0]?.length) holes.push(rings[0]);
+      }
     }
+
     return L.polygon([outerWorld, ...holes], {
       stroke: false,
       fill: true,
@@ -182,72 +165,93 @@
     });
   }
 
-  function createOutsideMaskForMultiPolygon(polygonsRings) {
-    const outerWorld = [
-      [85, -180],
-      [85, 180],
-      [-85, 180],
-      [-85, -180],
-    ];
-    const holes = [];
-    for (const rings of polygonsRings) {
-      if (rings?.[0]?.length) holes.push(rings[0]);
+  // Simple polygon area in m² (planar approx) using Leaflet’s geometry util if present; else fallback
+  function areaM2FromLayer(layer) {
+    try {
+      const gj = layer.toGeoJSON();
+      const geom = gj?.geometry;
+      if (!geom) return null;
+
+      // If Leaflet’s built-in geometry util exists (not always), use it:
+      if (L.GeometryUtil?.geodesicArea) {
+        const latlngs = layer.getLatLngs();
+        // latlngs structure varies; take first ring of first polygon
+        const ring = Array.isArray(latlngs?.[0]?.[0]) ? latlngs[0][0] : latlngs[0];
+        if (Array.isArray(ring) && ring.length >= 3) return Math.abs(L.GeometryUtil.geodesicArea(ring));
+      }
+
+      // Fallback: very rough by projected pixels at current zoom (good enough for “size view”)
+      const map = state.map;
+      const latlngs = layer.getLatLngs();
+      const ring = Array.isArray(latlngs?.[0]?.[0]) ? latlngs[0][0] : latlngs[0];
+      if (!ring || ring.length < 3) return null;
+
+      const pts = ring.map(ll => map.project(ll, map.getMaxZoom()));
+      let sum = 0;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        sum += (a.x * b.y - b.x * a.y);
+      }
+      const pxArea = Math.abs(sum / 2);
+      // Convert pixel² to meters² using CRS scale at maxZoom
+      // This is approximate; better later with turf.js, but acceptable for Stage 0 UX.
+      const scale = map.options.crs.scale(map.getMaxZoom());
+      const metersPerPx = 40075016.68557849 / scale; // Earth circumference / scale
+      return pxArea * metersPerPx * metersPerPx;
+    } catch (e) {
+      console.warn("Area calc failed", e);
+      return null;
     }
-    return L.polygon([outerWorld, ...holes], {
-      stroke: false,
-      fill: true,
-      fillOpacity: 0.65,
-      interactive: false,
-    });
+  }
+
+  function fmtArea(m2) {
+    if (!Number.isFinite(m2)) return "n/a";
+    const acres = m2 / 4046.8564224;
+    if (acres >= 1) return `${acres.toFixed(2)} acres`;
+    return `${m2.toFixed(0)} m²`;
   }
 
   // -----------------------------
-  // UI: Suggestions + View/Store buttons
+  // Storage (local only)
   // -----------------------------
-  function ensureViewButton() {
-    let btn = $("viewBtn");
-    if (btn) return btn;
+  const LS_KEY = "snowbridge_v1";
 
-    btn = document.createElement("button");
-    btn.id = "viewBtn";
-    btn.type = "button";
-    btn.textContent = "View";
-    btn.disabled = true;
-    btn.style.padding = "8px 12px";
-    btn.style.borderRadius = "8px";
-    btn.style.border = "1px solid #d1d5db";
-    btn.style.background = "#f9fafb";
-    btn.style.cursor = "pointer";
-
-    if (el.addrBtn?.parentNode) {
-      el.addrBtn.parentNode.insertBefore(btn, el.addrBtn.nextSibling);
-    } else if (el.topbar) {
-      el.topbar.appendChild(btn);
+  function loadDB() {
+    try {
+      const raw = localStorage.getItem(LS_KEY);
+      const obj = raw ? JSON.parse(raw) : {};
+      return (obj && typeof obj === "object") ? obj : {};
+    } catch {
+      return {};
     }
-    return btn;
   }
 
-  function ensureStoreButton() {
-    let btn = $("storeBtn");
-    if (btn) return btn;
-
-    btn = document.createElement("button");
-    btn.id = "storeBtn";
-    btn.type = "button";
-    btn.textContent = "Store";
-    btn.disabled = true;
-    btn.style.padding = "8px 12px";
-    btn.style.borderRadius = "8px";
-    btn.style.border = "1px solid #d1d5db";
-    btn.style.background = "#f9fafb";
-    btn.style.cursor = "pointer";
-
-    if (state?.viewBtn?.parentNode) {
-      state.viewBtn.parentNode.insertBefore(btn, state.viewBtn.nextSibling);
-    }
-    return btn;
+  function saveDB(db) {
+    localStorage.setItem(LS_KEY, JSON.stringify(db));
   }
 
+  // schema:
+  // db[roll] = { drawingDataUrl: string, request: { severity:"green|yellow|red", seniors:boolean, estSnow:string, notes:string }, updatedAt:number }
+  function getRecord(roll) {
+    const db = loadDB();
+    return db[String(roll)] || null;
+  }
+
+  function setRecord(roll, rec) {
+    const db = loadDB();
+    db[String(roll)] = rec;
+    saveDB(db);
+  }
+
+  function deleteRecord(roll) {
+    const db = loadDB();
+    delete db[String(roll)];
+    saveDB(db);
+  }
+
+  // -----------------------------
+  // UI: Suggest box
+  // -----------------------------
   function ensureSuggestBox() {
     let box = $("addrSuggest");
     if (box) return box;
@@ -278,12 +282,9 @@
     box.style.width = `${Math.round(r.width)}px`;
   }
 
-  // highlight for keyboard nav
   function setActiveRow(box, idx) {
     const kids = Array.from(box.children);
-    kids.forEach((el, i) => {
-      el.style.background = (i === idx) ? "#e5e7eb" : "transparent";
-    });
+    kids.forEach((node, i) => node.style.background = (i === idx) ? "#e5e7eb" : "transparent");
   }
 
   function renderSuggestions(box, items, onPick) {
@@ -314,11 +315,351 @@
   }
 
   // -----------------------------
-  // App state
+  // UI: Context menu (right click)
+  // -----------------------------
+  function ensureContextMenu() {
+    let cm = $("sbCtx");
+    if (cm) return cm;
+
+    cm = document.createElement("div");
+    cm.id = "sbCtx";
+    cm.style.position = "absolute";
+    cm.style.display = "none";
+    cm.style.zIndex = "10000";
+    cm.style.background = "#fff";
+    cm.style.border = "1px solid #d1d5db";
+    cm.style.borderRadius = "8px";
+    cm.style.boxShadow = "0 10px 22px rgba(0,0,0,0.14)";
+    cm.style.fontFamily = "system-ui, Arial, sans-serif";
+    cm.style.fontSize = "14px";
+    cm.style.minWidth = "140px";
+    cm.style.overflow = "hidden";
+
+    document.body.appendChild(cm);
+    return cm;
+  }
+
+  function hideContextMenu() {
+    if (!state.ctxMenu) return;
+    state.ctxMenu.style.display = "none";
+    state.ctxMenu.innerHTML = "";
+  }
+
+  function showContextMenuAt(pxX, pxY, items) {
+    const cm = state.ctxMenu;
+    cm.innerHTML = "";
+    for (const it of items) {
+      const row = document.createElement("div");
+      row.textContent = it.label;
+      row.style.padding = "10px 12px";
+      row.style.cursor = "pointer";
+      row.addEventListener("mouseenter", () => row.style.background = "#f3f4f6");
+      row.addEventListener("mouseleave", () => row.style.background = "transparent");
+      row.addEventListener("click", () => { hideContextMenu(); it.onClick(); });
+      cm.appendChild(row);
+    }
+
+    cm.style.left = `${Math.round(pxX)}px`;
+    cm.style.top = `${Math.round(pxY)}px`;
+    cm.style.display = "block";
+  }
+
+  // -----------------------------
+  // UI: Panel (draggable + resizable)
+  // -----------------------------
+  function ensurePanel() {
+    let p = $("sbPanel");
+    if (p) return p;
+
+    p = document.createElement("div");
+    p.id = "sbPanel";
+    p.style.position = "absolute";
+    p.style.zIndex = "10001";
+    p.style.display = "none";
+    p.style.left = "14px";
+    p.style.top = "74px";
+    p.style.width = "320px";
+    p.style.height = "340px";
+    p.style.background = "#ffffff";
+    p.style.border = "1px solid #d1d5db";
+    p.style.borderRadius = "12px";
+    p.style.boxShadow = "0 14px 34px rgba(0,0,0,0.16)";
+    p.style.overflow = "auto";
+    p.style.resize = "both"; // draggable sides/corners (browser-native)
+    p.style.minWidth = "260px";
+    p.style.minHeight = "220px";
+
+    // header (drag handle)
+    const header = document.createElement("div");
+    header.id = "sbPanelHeader";
+    header.style.cursor = "move";
+    header.style.padding = "10px 12px";
+    header.style.borderBottom = "1px solid #e5e7eb";
+    header.style.fontWeight = "600";
+    header.textContent = "SnowBridge";
+
+    const body = document.createElement("div");
+    body.id = "sbPanelBody";
+    body.style.padding = "10px 12px";
+
+    p.appendChild(header);
+    p.appendChild(body);
+    document.body.appendChild(p);
+
+    // drag logic
+    let dragging = false;
+    let startX = 0, startY = 0, startL = 0, startT = 0;
+
+    header.addEventListener("mousedown", (e) => {
+      dragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      const rect = p.getBoundingClientRect();
+      startL = rect.left;
+      startT = rect.top;
+      e.preventDefault();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      p.style.left = `${Math.round(startL + dx)}px`;
+      p.style.top = `${Math.round(startT + dy)}px`;
+    });
+
+    window.addEventListener("mouseup", () => { dragging = false; });
+
+    return p;
+  }
+
+  function openPanel() {
+    const p = state.panel;
+    const body = $("sbPanelBody");
+    const roll = state.selectedRoll;
+
+    if (!roll) return;
+
+    $("sbPanelHeader").textContent = `SnowBridge • ${roll}`;
+    body.innerHTML = "";
+
+    const mkBtn = (label) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.style.display = "block";
+      b.style.width = "100%";
+      b.style.padding = "10px 10px";
+      b.style.margin = "8px 0";
+      b.style.borderRadius = "10px";
+      b.style.border = "1px solid #d1d5db";
+      b.style.background = "#f9fafb";
+      b.style.cursor = "pointer";
+      b.addEventListener("mouseenter", () => b.style.background = "#f3f4f6");
+      b.addEventListener("mouseleave", () => b.style.background = "#f9fafb");
+      return b;
+    };
+
+    const mkNote = (text) => {
+      const d = document.createElement("div");
+      d.textContent = text;
+      d.style.fontSize = "13px";
+      d.style.color = "#4b5563";
+      d.style.marginTop = "6px";
+      return d;
+    };
+
+    // View Size (toggle)
+    const bSize = mkBtn("View size (toggle)");
+    bSize.onclick = () => toggleSize();
+    body.appendChild(bSize);
+
+    // View Satellite (toggle)
+    const bSat = mkBtn("View satellite (toggle)");
+    bSat.onclick = () => toggleSatellite();
+    body.appendChild(bSat);
+
+    // Draw (toggle)
+    const bDraw = mkBtn("Draw snowbridge (toggle)");
+    bDraw.onclick = () => toggleDraw();
+    body.appendChild(bDraw);
+
+    // Save
+    const bSave = mkBtn("Save snowbridge");
+    bSave.onclick = () => saveSnowbridge();
+    body.appendChild(bSave);
+
+    // View saved
+    const bView = mkBtn("View snowbridge");
+    bView.onclick = () => viewSnowbridge();
+    body.appendChild(bView);
+
+    // Request
+    const bReq = mkBtn("Request");
+    bReq.onclick = () => openRequestForm();
+    body.appendChild(bReq);
+
+    // Delete
+    const bDel = mkBtn("Delete snowbridge");
+    bDel.onclick = () => deleteSnowbridge();
+    body.appendChild(bDel);
+
+    // Exit
+    const bExit = mkBtn("Exit");
+    bExit.onclick = () => closePanel();
+    body.appendChild(bExit);
+
+    body.appendChild(mkNote("Tip: Right-click parcel → View. Left-click active parcel again → open this panel."));
+
+    p.style.display = "block";
+  }
+
+  function closePanel() {
+    state.panel.style.display = "none";
+    // turning off panel does NOT auto-exit query; user can keep blinking active if desired
+    // but per your spec, exit should return to worldview feel:
+    exitQueryStage();
+  }
+
+  // -----------------------------
+  // Drawing overlay (spray paint)
+  // -----------------------------
+  function ensureDrawCanvas() {
+    let c = $("sbCanvas");
+    if (c) return c;
+
+    c = document.createElement("canvas");
+    c.id = "sbCanvas";
+    c.style.position = "absolute";
+    c.style.left = "0";
+    c.style.top = "0";
+    c.style.zIndex = "8000"; // above tiles, below panel/menu
+    c.style.pointerEvents = "none"; // only enabled during draw mode
+    c.style.display = "none";
+
+    el.map.appendChild(c);
+    return c;
+  }
+
+  function resizeCanvasToMap() {
+    const c = state.canvas;
+    if (!c || !state.map) return;
+    const size = state.map.getSize();
+    c.width = size.x;
+    c.height = size.y;
+  }
+
+  function clearCanvas() {
+    const c = state.canvas;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    ctx.clearRect(0, 0, c.width, c.height);
+  }
+
+  function canvasToDataUrl() {
+    const c = state.canvas;
+    if (!c) return null;
+    return c.toDataURL("image/png");
+  }
+
+  function loadDataUrlToCanvas(dataUrl) {
+    return new Promise((resolve) => {
+      const c = state.canvas;
+      if (!c) return resolve(false);
+      const ctx = c.getContext("2d");
+      const img = new Image();
+      img.onload = () => {
+        ctx.clearRect(0, 0, c.width, c.height);
+        ctx.drawImage(img, 0, 0);
+        resolve(true);
+      };
+      img.onerror = () => resolve(false);
+      img.src = dataUrl;
+    });
+  }
+
+  function enableDrawMode() {
+    state.drawEnabled = true;
+    state.canvas.style.display = "block";
+    state.canvas.style.pointerEvents = "auto";
+
+    // cursor hint
+    state.canvas.style.cursor = "crosshair";
+    setStatus(`Draw ON • roll ${state.selectedRoll}`);
+
+    let drawing = false;
+
+    const brushR = 10; // spray radius
+    const ctx = state.canvas.getContext("2d");
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+
+    const spray = (x, y) => {
+      // spray = multiple dots for textured feel
+      for (let i = 0; i < 14; i++) {
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * brushR;
+        const dx = Math.cos(a) * r;
+        const dy = Math.sin(a) * r;
+        ctx.beginPath();
+        ctx.arc(x + dx, y + dy, 1.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+
+    const toCanvasXY = (e) => {
+      const rect = state.canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    };
+
+    const onDown = (e) => {
+      if (!state.drawEnabled) return;
+      drawing = true;
+      e.preventDefault();
+      const { x, y } = toCanvasXY(e);
+      spray(x, y);
+      state.hasUnsavedDrawing = true;
+    };
+
+    const onMove = (e) => {
+      if (!state.drawEnabled || !drawing) return;
+      const { x, y } = toCanvasXY(e);
+      spray(x, y);
+      state.hasUnsavedDrawing = true;
+    };
+
+    const onUp = () => { drawing = false; };
+
+    state.canvas.addEventListener("mousedown", onDown);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+
+    // stash handlers for clean disable
+    state._drawHandlers = { onDown, onMove, onUp };
+  }
+
+  function disableDrawMode() {
+    state.drawEnabled = false;
+    state.canvas.style.pointerEvents = "none";
+    state.canvas.style.cursor = "default";
+    setStatus(`Draw OFF • roll ${state.selectedRoll}`);
+
+    const h = state._drawHandlers;
+    if (h) {
+      state.canvas.removeEventListener("mousedown", h.onDown);
+      window.removeEventListener("mousemove", h.onMove);
+      window.removeEventListener("mouseup", h.onUp);
+    }
+    state._drawHandlers = null;
+  }
+
+  // -----------------------------
+  // Map state
   // -----------------------------
   const state = {
     cfg: null,
     map: null,
+
     basemap: null,
     satellite: null,
 
@@ -328,84 +669,132 @@
     parcelByRoll: new Map(),
     snowByRoll: new Map(),
 
-    addresses: [], // { label, norm, roll, lat, lng }
-    selectedRoll: null,
+    addresses: [],
 
-    // overlays for View-mode
+    selectedRoll: null,
+    isQueryStage: false,
+
+    // blinking
+    blinkTimer: null,
+    blinkOn: false,
+
+    // overlays
     maskLayer: null,
     snowOutlineLayer: null,
+    sizeOutlineLayer: null,
+    sizeLabelMarker: null,
 
     // ui
-    viewBtn: null,
-    storeBtn: null,
     suggestBox: null,
-    viewEnabled: false,
-
-    // storage + effects
-    storedRolls: new Set(),
-    blinkTimer: null,
-
-    // keyboard nav
     suggestIndex: -1,
+    ctxMenu: null,
+    panel: null,
+
+    // drawing
+    canvas: null,
+    drawEnabled: false,
+    hasUnsavedDrawing: false,
+    _drawHandlers: null,
+
+    // toggles in panel
+    satOn: false,
+    sizeOn: false,
   };
 
   // -----------------------------
-  // Style definitions
+  // Styling
   // -----------------------------
   const STYLE = {
-    idleParcel: { weight: 1, opacity: 0.7, fillOpacity: 0.08 },
-    idleSnow:   { weight: 1, opacity: 0.55, fillOpacity: 0.04 },
-
-    activeParcel: { weight: 3, opacity: 1, fillOpacity: 0.22, color: "#f59e0b" }, // amber
-    activeSnow:   { weight: 2, opacity: 0.95, fillOpacity: 0.08, color: "#f59e0b" },
-
-    storedParcel: { weight: 2, opacity: 1, fillOpacity: 0.16, color: "#10b981" }, // green
-    storedSnow:   { weight: 2, opacity: 0.9, fillOpacity: 0.06, color: "#10b981" },
+    idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" }, // blue-ish outline
+    // severity fill applied dynamically
+    activeParcelA: { weight: 3, opacity: 1, fillOpacity: 0.18, color: "#f59e0b" }, // blink on
+    activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" }, // blink off
+    sizeOutline: { weight: 3, opacity: 1, fillOpacity: 0.0, color: "#111827" },
+    snowOutline: { weight: 2, opacity: 1, fillOpacity: 0.0, color: "#ffffff" },
   };
 
-  // Helper: apply style based on active/stored/idle
-  function applyRollStyle(roll) {
-    const p = state.parcelByRoll.get(roll);
-    const s = state.snowByRoll.get(roll);
-
-    const isActive = (roll === state.selectedRoll);
-    const isStored = state.storedRolls.has(roll);
-
-    if (p) p.setStyle(isActive ? STYLE.activeParcel : isStored ? STYLE.storedParcel : STYLE.idleParcel);
-    if (s) s.setStyle(isActive ? STYLE.activeSnow   : isStored ? STYLE.storedSnow   : STYLE.idleSnow);
-
-    if (s) s.bringToFront();
-    if (p) p.bringToFront();
+  function severityStyleForRoll(roll) {
+    const rec = getRecord(roll);
+    const sev = rec?.request?.severity;
+    if (sev === "red") return { fillColor: "#ef4444", fillOpacity: 0.28 };
+    if (sev === "yellow") return { fillColor: "#f59e0b", fillOpacity: 0.22 };
+    if (sev === "green") return { fillColor: "#10b981", fillOpacity: 0.20 };
+    return { fillColor: null, fillOpacity: null };
   }
 
-  function restyleAllAffectedRolls(oldRoll, newRoll) {
-    if (oldRoll) applyRollStyle(oldRoll);
-    if (newRoll) applyRollStyle(newRoll);
+  function applyParcelStyle(roll) {
+    const layer = state.parcelByRoll.get(roll);
+    if (!layer) return;
+
+    // base style + severity fill
+    const sev = severityStyleForRoll(roll);
+    const base = { ...STYLE.idleParcel };
+    if (sev.fillColor) base.fillColor = sev.fillColor;
+    if (sev.fillOpacity != null) base.fillOpacity = sev.fillOpacity;
+
+    // if active + blinking, override
+    if (state.selectedRoll === roll && state.isQueryStage) {
+      layer.setStyle(state.blinkOn ? { ...base, ...STYLE.activeParcelA } : { ...base, ...STYLE.activeParcelB });
+    } else {
+      layer.setStyle(base);
+    }
   }
 
-  // Blink effect for active parcel
-  function blinkActiveOnce() {
-    if (!state.selectedRoll) return;
-    const roll = state.selectedRoll;
-    const p = state.parcelByRoll.get(roll);
-    if (!p) return;
-
-    const base = STYLE.activeParcel;
-    p.setStyle({ ...base, weight: base.weight + 2, fillOpacity: Math.min(0.35, (base.fillOpacity ?? 0.22) + 0.1) });
-
-    window.clearTimeout(state.blinkTimer);
-    state.blinkTimer = window.setTimeout(() => {
-      applyRollStyle(roll);
-    }, 220);
+  function restyleAllParcels() {
+    for (const roll of state.parcelByRoll.keys()) applyParcelStyle(roll);
   }
 
   // -----------------------------
-  // Core map + layers
+  // Address handling
+  // -----------------------------
+  function buildAddressIndex(addrGeo, joinKey) {
+    const rows = [];
+    for (const f of addrGeo.features || []) {
+      const p = f.properties || {};
+      const g = f.geometry;
+      if (!g || g.type !== "Point" || !Array.isArray(g.coordinates)) continue;
+
+      const roll = p[joinKey];
+      if (roll == null) continue; // parcel-aware
+
+      const label = p.full_addr ?? p.FULL_ADDR ?? p.FULLADDR ?? p.ADDR_FULL ?? p.ADDRESS ?? "";
+      const [lng, lat] = g.coordinates;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+      const txt = String(label).trim();
+      if (!txt) continue;
+
+      rows.push({ label: txt, norm: normalizeAddr(txt), roll: String(roll), lat, lng });
+    }
+    return rows;
+  }
+
+  function getSuggestions(query, limit = 12) {
+    const qNorm = normalizeAddr(query);
+    if (!qNorm) return [];
+    const scored = [];
+    for (const r of state.addresses) {
+      const s = scoreAddressCandidate(qNorm, r.norm);
+      if (s > 0) scored.push({ r, s });
+    }
+    scored.sort((a, b) => (b.s !== a.s) ? (b.s - a.s) : a.r.label.localeCompare(b.r.label));
+    return scored.slice(0, limit).map(x => x.r);
+  }
+
+  function onGo() {
+    const q = el.addrInput?.value ?? "";
+    const best = getSuggestions(q, 1)[0] || null;
+    if (!best) return setStatus("No match");
+    enterQueryStage(best.roll, { center: [best.lat, best.lng], source: "address" });
+  }
+
+  // -----------------------------
+  // Layers (IMPORTANT: snow layer non-interactive!)
   // -----------------------------
   function buildParcelsLayer(geojson, joinKey) {
     state.parcelByRoll.clear();
 
-    const lyr = L.geoJSON(geojson, {
+    return L.geoJSON(geojson, {
       style: STYLE.idleParcel,
       onEachFeature: (feature, layer) => {
         const roll = feature?.properties?.[joinKey];
@@ -414,233 +803,315 @@
         layer.on("click", () => {
           if (roll == null) return;
           const r = String(roll);
-          const isSame = (state.selectedRoll === r);
-          selectRoll(r, { zoom: true, enableView: true, zoomTighter: isSame });
-          blinkActiveOnce();
+
+          // if clicking active parcel again: open panel
+          if (state.isQueryStage && state.selectedRoll === r) {
+            openPanel();
+            return;
+          }
+
+          enterQueryStage(r, { source: "left-click" });
+        });
+
+        layer.on("contextmenu", (e) => {
+          if (roll == null) return;
+          const r = String(roll);
+          const px = e.originalEvent?.clientX ?? 0;
+          const py = e.originalEvent?.clientY ?? 0;
+          showContextMenuAt(px, py, [
+            { label: "View", onClick: () => enterQueryStage(r, { source: "right-click" }) },
+          ]);
         });
       },
     });
-
-    return lyr;
   }
 
   function buildSnowLayer(geojson, joinKey) {
     state.snowByRoll.clear();
 
-    const lyr = L.geoJSON(geojson, {
-      style: STYLE.idleSnow,
+    return L.geoJSON(geojson, {
+      interactive: false, // <-- critical: don't steal clicks
+      style: { weight: 1, opacity: 0.35, fillOpacity: 0.0 },
       onEachFeature: (feature, layer) => {
         const roll = feature?.properties?.[joinKey];
         if (roll != null) state.snowByRoll.set(String(roll), layer);
       },
     });
+  }
 
-    return lyr;
+  // -----------------------------
+  // Query stage (slow blink + zoom)
+  // -----------------------------
+  function stopBlink() {
+    if (state.blinkTimer) window.clearInterval(state.blinkTimer);
+    state.blinkTimer = null;
+    state.blinkOn = false;
+  }
+
+  function startBlink() {
+    stopBlink();
+    state.blinkOn = true;
+    state.blinkTimer = window.setInterval(() => {
+      state.blinkOn = !state.blinkOn;
+      if (state.selectedRoll) applyParcelStyle(state.selectedRoll);
+    }, 650); // slow-ish
   }
 
   function fitToRoll(roll) {
     const padding = state.cfg?.map?.fitPaddingPx ?? 20;
-    const target = state.parcelByRoll.get(roll) || state.snowByRoll.get(roll);
+    const target = state.parcelByRoll.get(roll);
     if (!target) return;
     state.map.fitBounds(target.getBounds(), { padding: [padding, padding] });
   }
 
-  // -----------------------------
-  // Selection and storage
-  // -----------------------------
-  function selectRoll(roll, { zoom, enableView, zoomTighter } = { zoom: true, enableView: true, zoomTighter: false }) {
+  function zoomTight() {
+    const z = Math.max(state.map.getZoom(), state.cfg?.map?.queryZoom ?? 19);
+    state.map.setZoom(z);
+  }
+
+  function enterQueryStage(roll, { center = null, source = "" } = {}) {
+    hideContextMenu();
     const old = state.selectedRoll;
-    state.selectedRoll = roll;
 
-    restyleAllAffectedRolls(old, roll);
+    state.selectedRoll = String(roll);
+    state.isQueryStage = true;
 
-    if (zoom) {
-      fitToRoll(roll);
-      if (zoomTighter) {
-        const z = state.map.getZoom();
-        state.map.setZoom(z + 1);
-      }
-    }
+    // restyle old and new
+    if (old) applyParcelStyle(old);
+    applyParcelStyle(state.selectedRoll);
 
-    const storedSuffix = state.storedRolls.has(roll) ? " • stored" : "";
-    setStatus(`Active • roll ${roll}${storedSuffix}`);
+    // zoom behavior
+    if (center) state.map.setView(center, Math.max(state.map.getZoom(), 17));
+    fitToRoll(state.selectedRoll);
+    zoomTight();
 
-    if (enableView && state.viewBtn) {
-      state.viewBtn.disabled = false;
-      state.viewEnabled = true;
-    }
+    startBlink();
+    setStatus(`Query • roll ${state.selectedRoll}${source ? ` • ${source}` : ""}`);
 
-    if (state.storeBtn) {
-      state.storeBtn.disabled = !state.selectedRoll;
-    }
-
-    // keep View sticky
-    if (state.maskLayer) enableSatelliteMaskedToSnowZone();
-
-    console.log("Selected roll:", roll);
+    // auto-close panel if it’s for another parcel
+    if (state.panel.style.display !== "none") openPanel();
   }
 
-  function markSelectedAsStored() {
-    if (!state.selectedRoll) return;
-    state.storedRolls.add(state.selectedRoll);
-    applyRollStyle(state.selectedRoll);
-    setStatus(`Stored • roll ${state.selectedRoll}`);
+  function exitQueryStage() {
+    stopBlink();
+    toggleSatellite(false);
+    toggleSize(false);
+    if (state.drawEnabled) toggleDraw(false);
+
+    const roll = state.selectedRoll;
+    state.isQueryStage = false;
+    state.selectedRoll = null;
+
+    if (roll) applyParcelStyle(roll);
+    setStatus("Ready • search or click a parcel");
   }
 
   // -----------------------------
-  // Address index + suggestions
+  // Size toggle
   // -----------------------------
-  function buildAddressIndex(addrGeo, joinKey) {
-    const rows = [];
-
-    for (const f of addrGeo.features || []) {
-      const p = f.properties || {};
-      const g = f.geometry;
-      if (!g || g.type !== "Point" || !Array.isArray(g.coordinates)) continue;
-
-      const roll = p[joinKey];
-      if (roll == null) continue;
-
-      const label =
-        p.full_addr ??
-        p.FULL_ADDR ??
-        p.FULLADDR ??
-        p.ADDR_FULL ??
-        p.ADDRESS ??
-        "";
-
-      const [lng, lat] = g.coordinates;
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-
-      const txt = String(label).trim();
-      if (!txt) continue;
-
-      rows.push({
-        label: txt,
-        norm: normalizeAddr(txt),
-        roll: String(roll),
-        lat,
-        lng,
-      });
-    }
-
-    return rows;
+  function clearSizeOverlays() {
+    if (state.sizeOutlineLayer) { try { state.map.removeLayer(state.sizeOutlineLayer); } catch {} state.sizeOutlineLayer = null; }
+    if (state.sizeLabelMarker) { try { state.map.removeLayer(state.sizeLabelMarker); } catch {} state.sizeLabelMarker = null; }
   }
 
-  function getSuggestions(query, limit = 12) {
-    const qNorm = normalizeAddr(query);
-    if (!qNorm) return [];
+  function toggleSize(force) {
+    const next = (typeof force === "boolean") ? force : !state.sizeOn;
+    state.sizeOn = next;
 
-    const scored = [];
-    for (const r of state.addresses) {
-      const s = scoreAddressCandidate(qNorm, r.norm);
-      if (s > 0) scored.push({ r, s });
-    }
+    clearSizeOverlays();
 
-    scored.sort((a, b) => {
-      if (b.s !== a.s) return b.s - a.s;
-      return a.r.label.localeCompare(b.r.label);
-    });
-
-    return scored.slice(0, limit).map(x => x.r);
-  }
-
-  function onGo() {
-    const q = el.addrInput?.value ?? "";
-    const qn = normalizeAddr(q);
-    if (!qn) {
-      setStatus("Type an address");
+    if (!next) {
+      setStatus(`Size OFF • roll ${state.selectedRoll}`);
       return;
     }
 
-    const best = getSuggestions(q, 1)[0] || null;
-    if (!best) {
-      setStatus("No match");
-      return;
-    }
+    const roll = state.selectedRoll;
+    if (!roll) return setStatus("Select a parcel first");
 
-    state.map.setView([best.lat, best.lng], Math.max(state.map.getZoom(), 17));
-    selectRoll(best.roll, { zoom: true, enableView: true });
+    const parcel = state.parcelByRoll.get(roll);
+    if (!parcel) return setStatus("Parcel not found");
+
+    const areaM2 = areaM2FromLayer(parcel);
+    const txt = `Size • ${fmtArea(areaM2)}`;
+
+    // outline
+    state.sizeOutlineLayer = L.geoJSON(parcel.toGeoJSON(), { style: STYLE.sizeOutline, interactive: false }).addTo(state.map);
+
+    // label near centroid (bounds center)
+    const c = parcel.getBounds().getCenter();
+    state.sizeLabelMarker = L.marker(c, { interactive: false, opacity: 0.95 }).addTo(state.map);
+    state.sizeLabelMarker.bindTooltip(txt, { permanent: true, direction: "top", offset: [0, -8] }).openTooltip();
+
+    setStatus(`${txt} • roll ${roll}`);
   }
 
   // -----------------------------
-  // View mode: satellite + mask outside selected +8m parcel
+  // Satellite masked toggle (ONLY via panel)
   // -----------------------------
   function clearViewOverlays() {
-    if (state.maskLayer) {
-      try { state.map.removeLayer(state.maskLayer); } catch (_) {}
-      state.maskLayer = null;
-    }
-    if (state.snowOutlineLayer) {
-      try { state.map.removeLayer(state.snowOutlineLayer); } catch (_) {}
-      state.snowOutlineLayer = null;
-    }
+    if (state.maskLayer) { try { state.map.removeLayer(state.maskLayer); } catch {} state.maskLayer = null; }
+    if (state.snowOutlineLayer) { try { state.map.removeLayer(state.snowOutlineLayer); } catch {} state.snowOutlineLayer = null; }
   }
 
-  // Guard for satellite view minimum zoom
   function canUseSatelliteNow() {
     const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
-    const z = state.map?.getZoom?.() ?? 0;
-    return z >= minz;
+    return (state.map.getZoom() >= minz);
   }
 
-  function enableSatelliteMaskedToSnowZone() {
-    if (!state.selectedRoll) {
-      setStatus("Select a parcel first");
-      return;
-    }
-
-    // Guard: require enough zoom
-    if (!canUseSatelliteNow()) {
-      const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
-      setStatus(`Zoom in to ${minz}+ for View`);
-      return;
-    }
-
-    const snowFeatureLayer = state.snowByRoll.get(state.selectedRoll);
-    if (!snowFeatureLayer) {
-      setStatus("Snow zone not found for this parcel (+8m layer join mismatch?)");
-      return;
-    }
-
-    if (state.satellite && !state.map.hasLayer(state.satellite)) {
-      state.satellite.addTo(state.map);
-    }
+  function toggleSatellite(force) {
+    const next = (typeof force === "boolean") ? force : !state.satOn;
+    state.satOn = next;
 
     clearViewOverlays();
 
-    const gj = snowFeatureLayer.toGeoJSON();
-    const geom = gj?.geometry;
-    const ringsOrPolys = polygonLatLngRingsFromGeoJSON(geom);
+    if (!next) {
+      if (state.map.hasLayer(state.satellite)) state.map.removeLayer(state.satellite);
+      setStatus(`Satellite OFF • roll ${state.selectedRoll ?? ""}`.trim());
+      return;
+    }
 
-    if (!ringsOrPolys) {
+    const roll = state.selectedRoll;
+    if (!roll) return setStatus("Select a parcel first");
+
+    if (!canUseSatelliteNow()) {
+      const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
+      setStatus(`Zoom in to ${minz}+ for satellite`);
+      state.satOn = false;
+      return;
+    }
+
+    const snow = state.snowByRoll.get(roll);
+    if (!snow) {
+      state.satOn = false;
+      setStatus("Snow zone not found (+8m join mismatch?)");
+      return;
+    }
+
+    // Always masked: satellite layer + outside mask
+    if (!state.map.hasLayer(state.satellite)) state.satellite.addTo(state.map);
+
+    const gj = snow.toGeoJSON();
+    const geom = gj?.geometry;
+    const rings = polygonLatLngRingsFromGeoJSON(geom);
+    if (!rings) {
+      state.satOn = false;
       setStatus("Unable to build mask from snow zone geometry");
       return;
     }
 
-    if (geom.type === "Polygon") {
-      state.maskLayer = createOutsideMaskForPolygonRings(ringsOrPolys);
-    } else {
-      state.maskLayer = createOutsideMaskForMultiPolygon(ringsOrPolys);
-    }
+    state.maskLayer = createOutsideMaskFromGeom(geom, rings).addTo(state.map);
+    state.snowOutlineLayer = L.geoJSON(gj, { style: STYLE.snowOutline, interactive: false }).addTo(state.map);
 
-    state.maskLayer.addTo(state.map);
-
-    state.snowOutlineLayer = L.geoJSON(gj, {
-      style: { weight: 2, opacity: 1, fillOpacity: 0.0 },
-      interactive: false,
-    }).addTo(state.map);
-
-    setStatus(`View • roll ${state.selectedRoll}`);
-    console.log("View enabled for roll:", state.selectedRoll);
+    setStatus(`Satellite ON • roll ${roll}`);
   }
 
   // -----------------------------
-  // Draw mode stub (Phase 2)
+  // Draw toggle
   // -----------------------------
-  function enableDrawModeStub() {
-    setStatus("Draw mode not installed yet (requires Leaflet.draw). Next step: add the library.");
-    console.log("Draw stub: add Leaflet.draw to index.html to enable drawing + export.");
+  function toggleDraw(force) {
+    const next = (typeof force === "boolean") ? force : !state.drawEnabled;
+
+    if (next) {
+      // You asked: drawing occurs on satellite backdrop. If sat isn't on, turn it on.
+      if (!state.satOn) toggleSatellite(true);
+      if (!state.satOn) return; // failed to enable sat (zoom too low etc.)
+      enableDrawMode();
+      return;
+    }
+
+    disableDrawMode();
+    state.canvas.style.display = "none";
+    setStatus(`Draw OFF • roll ${state.selectedRoll}`);
+  }
+
+  // -----------------------------
+  // Save / View / Delete snowbridge
+  // -----------------------------
+  async function viewSnowbridge() {
+    const roll = state.selectedRoll;
+    if (!roll) return setStatus("Select a parcel first");
+
+    const rec = getRecord(roll);
+    if (!rec?.drawingDataUrl) return setStatus("No saved snowbridge for this parcel");
+
+    // Ensure satellite and canvas visible so user sees it
+    if (!state.satOn) toggleSatellite(true);
+    if (!state.satOn) return;
+
+    state.canvas.style.display = "block";
+    resizeCanvasToMap();
+    await loadDataUrlToCanvas(rec.drawingDataUrl);
+    setStatus(`Loaded snowbridge • roll ${roll}`);
+  }
+
+  function saveSnowbridge() {
+    const roll = state.selectedRoll;
+    if (!roll) return setStatus("Select a parcel first");
+
+    // require a drawing visible / made
+    if (!state.hasUnsavedDrawing && !getRecord(roll)?.drawingDataUrl) {
+      return setStatus("Error • no drawing to save");
+    }
+
+    const dataUrl = canvasToDataUrl();
+    if (!dataUrl || dataUrl.length < 200) return setStatus("Error • drawing capture failed");
+
+    const existing = getRecord(roll);
+    // request is required to be “paired” per your spec
+    if (!existing?.request) return setStatus("Error • add Request before saving");
+
+    setRecord(roll, { ...existing, drawingDataUrl: dataUrl, updatedAt: Date.now() });
+    state.hasUnsavedDrawing = false;
+    restyleAllParcels(); // severity fill might already exist; refresh anyway
+    setStatus(`Saved snowbridge • roll ${roll}`);
+  }
+
+  function deleteSnowbridge() {
+    const roll = state.selectedRoll;
+    if (!roll) return setStatus("Select a parcel first");
+
+    const rec = getRecord(roll);
+    if (!rec) return setStatus("Error • nothing stored for this parcel");
+
+    const ok = window.confirm(`Delete stored snowbridge + request for ${roll}?`);
+    if (!ok) return;
+
+    deleteRecord(roll);
+    clearCanvas();
+    state.hasUnsavedDrawing = false;
+    restyleAllParcels();
+    setStatus(`Deleted snowbridge • roll ${roll}`);
+  }
+
+  // -----------------------------
+  // Request form (modal-ish prompt)
+  // -----------------------------
+  function openRequestForm() {
+    const roll = state.selectedRoll;
+    if (!roll) return setStatus("Select a parcel first");
+
+    // require drawing observed (either current unsaved strokes or saved drawing)
+    const hasDrawing = state.hasUnsavedDrawing || !!getRecord(roll)?.drawingDataUrl;
+    if (!hasDrawing) return setStatus("Error • draw snowbridge before Request");
+
+    // simple form (upgrade later to real modal UI)
+    const severity = (prompt("Severity (green / yellow / red):", "yellow") || "").toLowerCase().trim();
+    const sev = (severity === "green" || severity === "yellow" || severity === "red") ? severity : null;
+    if (!sev) return setStatus("Error • invalid severity");
+
+    const seniors = (prompt("Seniors/at-risk on site? (yes/no):", "no") || "").toLowerCase().startsWith("y");
+    const estSnow = (prompt("Estimated snow (e.g. 10cm, 20cm):", "10cm") || "").trim();
+    const notes = (prompt("Notes (optional):", "") || "").trim();
+
+    const existing = getRecord(roll) || {};
+    setRecord(roll, {
+      ...existing,
+      request: { severity: sev, seniors, estSnow, notes },
+      updatedAt: Date.now(),
+    });
+
+    restyleAllParcels();
+    setStatus(`Request saved • ${sev.toUpperCase()} • roll ${roll}`);
   }
 
   // -----------------------------
@@ -650,36 +1121,44 @@
     setStatus("Loading…");
 
     state.cfg = await loadConfigOrFallback();
-    const joinKey = state.cfg?.data?.joinKey || "ROLLNUMSHO";
+    const joinKey = state.cfg?.data?.joinKey || FALLBACK_CFG.data.joinKey;
     const files = state.cfg?.data?.files || FALLBACK_CFG.data.files;
 
-    // Create map immediately
+    // Map
     state.map = L.map("map", { zoomControl: true });
-    state.map.setMinZoom(state.cfg?.map?.minZoom ?? 0);
-    // Max zoom comes from tiles or config; Leaflet docs note map maxZoom considers layer options. :contentReference[oaicite:0]{index=0}
+    state.map.setMinZoom(state.cfg?.map?.minZoom ?? FALLBACK_CFG.map.minZoom);
     state.map.setMaxZoom(state.cfg?.map?.maxZoom ?? FALLBACK_CFG.map.maxZoom);
 
-    // Base tiles
+    // Basemap + satellite (satellite not added until toggleSatellite)
     const baseUrl = state.cfg?.basemaps?.base?.url || FALLBACK_CFG.basemaps.base.url;
     const baseOpt = { ...(state.cfg?.basemaps?.base?.options || FALLBACK_CFG.basemaps.base.options) };
-    // Ensure overzoom configuration present
     baseOpt.maxNativeZoom ??= 19;
-    baseOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? FALLBACK_CFG.map.maxZoom;
+    baseOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
     state.basemap = L.tileLayer(baseUrl, baseOpt).addTo(state.map);
 
-    // Satellite tiles
     const satUrl = state.cfg?.basemaps?.satellite?.url || FALLBACK_CFG.basemaps.satellite.url;
     const satOpt = { ...(state.cfg?.basemaps?.satellite?.options || FALLBACK_CFG.basemaps.satellite.options) };
     satOpt.maxNativeZoom ??= 19;
-    satOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? FALLBACK_CFG.map.maxZoom;
+    satOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
     state.satellite = L.tileLayer(satUrl, satOpt);
 
-    // UI widgets (View, Store + suggestions)
-    state.viewBtn = ensureViewButton();
-    state.storeBtn = ensureStoreButton();
+    // UI
     state.suggestBox = ensureSuggestBox();
+    state.ctxMenu = ensureContextMenu();
+    state.panel = ensurePanel();
+    state.canvas = ensureDrawCanvas();
 
-    // Button wiring
+    // Canvas sizing
+    state.map.on("resize", () => { resizeCanvasToMap(); });
+    state.map.on("move", () => { /* keep canvas fixed to container */ });
+    resizeCanvasToMap();
+
+    // Hide ctx menu on click elsewhere
+    document.addEventListener("click", (e) => {
+      if (state.ctxMenu.style.display !== "none" && !state.ctxMenu.contains(e.target)) hideContextMenu();
+    });
+
+    // Address UI
     if (el.addrBtn) el.addrBtn.addEventListener("click", onGo);
 
     if (el.addrInput) {
@@ -713,6 +1192,7 @@
       el.addrInput.addEventListener("input", () => {
         const q = el.addrInput.value || "";
         const matches = getSuggestions(q, 12);
+        state.suggestIndex = -1;
         renderSuggestions(state.suggestBox, matches, (picked) => {
           el.addrInput.value = picked.label;
           state.suggestIndex = -1;
@@ -723,6 +1203,7 @@
       el.addrInput.addEventListener("focus", () => {
         const q = el.addrInput.value || "";
         const matches = getSuggestions(q, 12);
+        state.suggestIndex = -1;
         renderSuggestions(state.suggestBox, matches, (picked) => {
           el.addrInput.value = picked.label;
           state.suggestIndex = -1;
@@ -731,42 +1212,8 @@
       });
     }
 
-    // Hide suggestions when clicking elsewhere
-    document.addEventListener("click", (e) => {
-      const box = state.suggestBox;
-      if (!box || box.style.display === "none") return;
-      if (e.target === el.addrInput) return;
-      if (box.contains(e.target)) return;
-      box.style.display = "none";
-    });
-
-    // Reposition suggestions on resize/scroll
     window.addEventListener("resize", () => positionSuggestBox(state.suggestBox));
     window.addEventListener("scroll", () => positionSuggestBox(state.suggestBox), true);
-
-    // View button
-    state.viewBtn.addEventListener("click", () => {
-      enableSatelliteMaskedToSnowZone();
-    });
-
-    // Store button
-    state.storeBtn.addEventListener("click", () => {
-      markSelectedAsStored();
-    });
-
-    // Manual satellite toggle
-    if (el.satToggle) {
-      el.satToggle.addEventListener("change", () => {
-        if (!el.satToggle.checked) {
-          if (state.map.hasLayer(state.satellite)) state.map.removeLayer(state.satellite);
-          clearViewOverlays();
-          setStatus("Satellite OFF");
-        } else {
-          state.satellite.addTo(state.map);
-          setStatus("Satellite ON (unmasked)");
-        }
-      });
-    }
 
     // Load data
     try {
@@ -778,23 +1225,24 @@
       const snowGeo = await loadJSON(files.snowZone);
       state.snowLayer = buildSnowLayer(snowGeo, joinKey).addTo(state.map);
 
-      // Bring parcels on top
-      try { state.parcelsLayer.bringToFront(); } catch (_) {}
+      // ensure parcels are on top for interaction
+      try { state.parcelsLayer.bringToFront(); } catch {}
 
       setStatus("Loading addresses…");
       const addrGeo = await loadJSON(files.addresses);
       state.addresses = buildAddressIndex(addrGeo, joinKey);
 
-      // Auto-center
-      const b1 = state.parcelsLayer?.getBounds?.();
-      const b2 = state.snowLayer?.getBounds?.();
-      const all = unionBounds([b1, b2]);
-
-      if (all && all.isValid && all.isValid()) {
-        state.map.fitBounds(all, { padding: [20, 20] });
+      // Fit to bounds
+      const b = state.parcelsLayer?.getBounds?.();
+      if (b && b.isValid && b.isValid()) {
+        state.map.fitBounds(b, { padding: [20, 20] });
       } else {
-        state.map.setView([42.93, -80.28], 14);
+        const sv = state.cfg?.map?.startView ?? FALLBACK_CFG.map.startView;
+        state.map.setView([sv.lat, sv.lng], sv.zoom);
       }
+
+      // Apply severity coloring from saved records
+      restyleAllParcels();
 
       setStatus(`Ready • ${state.addresses.length} addresses • search or click a parcel`);
       console.log("Loaded:", {
