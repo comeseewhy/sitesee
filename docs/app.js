@@ -1,4 +1,5 @@
 import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } from "./js/core/storage.js";
+import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -42,57 +43,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
   if (!el.map) {
     hardFail("Missing #map element in index.html");
     return;
-  }
-
-  // -----------------------------
-  // Config
-  // -----------------------------
-  const FALLBACK_CFG = {
-    map: {
-      startView: { lat: 42.93, lng: -80.28, zoom: 14 },
-      minZoom: 11,
-      maxZoom: 22,
-      fitPaddingPx: 20,
-      satelliteEnableMinZoom: 16,
-      queryZoom: 19,
-    },
-    data: {
-      joinKey: "ROLLNUMSHO",
-      files: {
-        addresses: "./SnowBridge_addresses_4326.geojson",
-        parcels: "./SnowBridge_parcels_4326.geojson",
-        snowZone: "./SnowBridge_parcels_+8m_4326.geojson",
-      },
-    },
-    basemaps: {
-      base: {
-        url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-        options: { maxNativeZoom: 19, maxZoom: 22, attribution: "© OpenStreetMap contributors" },
-      },
-      satellite: {
-        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        options: { maxNativeZoom: 19, maxZoom: 22, attribution: "Tiles © Esri" },
-      },
-    },
-  };
-
-  async function loadJSON(url) {
-    console.log("Fetching:", url);
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) throw new Error(`${url} → ${res.status} ${res.statusText}`);
-    return res.json();
-  }
-
-  async function loadConfigOrFallback() {
-    try {
-      const cfg = await loadJSON("./config.json");
-      if (!cfg?.data?.files?.parcels) throw new Error("config missing data.files.parcels");
-      return cfg;
-    } catch (e) {
-      console.warn("Config load failed; using fallback config.", e);
-      setStatus("Config not loaded (fallback mode) — still running.");
-      return FALLBACK_CFG;
-    }
   }
 
   // -----------------------------
@@ -197,7 +147,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
       }
       const pxArea = Math.abs(sum / 2);
       // Convert pixel² to meters² using CRS scale at maxZoom
-      // This is approximate; better later with turf.js, but acceptable for Stage 0 UX.
       const scale = map.options.crs.scale(map.getMaxZoom());
       const metersPerPx = 40075016.68557849 / scale; // Earth circumference / scale
       return pxArea * metersPerPx * metersPerPx;
@@ -539,8 +488,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
 
   function closePanel() {
     state.panel.style.display = "none";
-    // turning off panel does NOT auto-exit query; user can keep blinking active if desired
-    // but per your spec, exit should return to worldview feel:
     exitQueryStage();
   }
 
@@ -604,14 +551,11 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
   function enableDrawMode() {
     state.drawEnabled = true;
 
-    // Ensure satellite is on (drawing is on satellite)
     if (!state.satOn) toggleSatellite(true);
     if (!state.satOn) return;
 
-    // Lock map movement while drawing
     lockMapInteractions(true);
 
-    // Force tight view: center parcel + zoom 22
     const roll = state.selectedRoll;
     const parcel = roll ? state.parcelByRoll.get(roll) : null;
     if (parcel) {
@@ -629,9 +573,8 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
 
     let drawing = false;
 
-    // Bigger spray
-    const brushR = 18; // was 10
-    const dotsPerSpray = 26; // was 14
+    const brushR = 18;
+    const dotsPerSpray = 26;
 
     const ctx = state.canvas.getContext("2d");
     ctx.globalCompositeOperation = "source-over";
@@ -678,14 +621,12 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
 
-    // stash handlers for clean disable
     state._drawHandlers = { onDown, onMove, onUp };
   }
 
   function disableDrawMode() {
     state.drawEnabled = false;
 
-    // Unlock map movement again
     lockMapInteractions(false);
 
     state.canvas.style.pointerEvents = "none";
@@ -753,10 +694,9 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
   // Styling
   // -----------------------------
   const STYLE = {
-    idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" }, // blue-ish outline
-    // severity fill applied dynamically
-    activeParcelA: { weight: 3, opacity: 1, fillOpacity: 0.18, color: "#f59e0b" }, // blink on
-    activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" }, // blink off
+    idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" },
+    activeParcelA: { weight: 3, opacity: 1, fillOpacity: 0.18, color: "#f59e0b" },
+    activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" },
     sizeOutline: { weight: 3, opacity: 1, fillOpacity: 0.0, color: "#111827" },
     snowOutline: { weight: 2, opacity: 1, fillOpacity: 0.0, color: "#ffffff" },
   };
@@ -774,13 +714,11 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     const layer = state.parcelByRoll.get(roll);
     if (!layer) return;
 
-    // base style + severity fill
     const sev = severityStyleForRoll(roll);
     const base = { ...STYLE.idleParcel };
     if (sev.fillColor) base.fillColor = sev.fillColor;
     if (sev.fillOpacity != null) base.fillOpacity = sev.fillOpacity;
 
-    // if active + blinking, override
     if (state.selectedRoll === roll && state.isQueryStage) {
       layer.setStyle(state.blinkOn ? { ...base, ...STYLE.activeParcelA } : { ...base, ...STYLE.activeParcelB });
     } else {
@@ -803,7 +741,7 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
       if (!g || g.type !== "Point" || !Array.isArray(g.coordinates)) continue;
 
       const roll = p[joinKey];
-      if (roll == null) continue; // parcel-aware
+      if (roll == null) continue;
 
       const label = p.full_addr ?? p.FULL_ADDR ?? p.FULLADDR ?? p.ADDR_FULL ?? p.ADDRESS ?? "";
       const [lng, lat] = g.coordinates;
@@ -825,7 +763,7 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
       const s = scoreAddressCandidate(qNorm, r.norm);
       if (s > 0) scored.push({ r, s });
     }
-    scored.sort((a, b) => (b.s !== a.s) ? b.s - a.s : a.r.label.localeCompare(b.r.label));
+    scored.sort((a, b) => (b.s !== a.s ? b.s - a.s : a.r.label.localeCompare(b.r.label)));
     return scored.slice(0, limit).map((x) => x.r);
   }
 
@@ -852,7 +790,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
           if (roll == null) return;
           const r = String(roll);
 
-          // if clicking active parcel again: open panel
           if (state.isQueryStage && state.selectedRoll === r) {
             openPanel();
             return;
@@ -876,7 +813,7 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     state.snowByRoll.clear();
 
     return L.geoJSON(geojson, {
-      interactive: false, // <-- critical: don't steal clicks
+      interactive: false,
       style: { weight: 1, opacity: 0.35, fillOpacity: 0.0 },
       onEachFeature: (feature, layer) => {
         const roll = feature?.properties?.[joinKey];
@@ -900,7 +837,7 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     state.blinkTimer = window.setInterval(() => {
       state.blinkOn = !state.blinkOn;
       if (state.selectedRoll) applyParcelStyle(state.selectedRoll);
-    }, 650); // slow-ish
+    }, 650);
   }
 
   function fitToRoll(roll) {
@@ -922,11 +859,9 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     state.selectedRoll = String(roll);
     state.isQueryStage = true;
 
-    // restyle old and new
     if (old) applyParcelStyle(old);
     applyParcelStyle(state.selectedRoll);
 
-    // zoom behavior
     if (center) state.map.setView(center, Math.max(state.map.getZoom(), 17));
     fitToRoll(state.selectedRoll);
     zoomTight();
@@ -934,7 +869,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     startBlink();
     setStatus(`Query • roll ${state.selectedRoll}${source ? ` • ${source}` : ""}`);
 
-    // auto-close panel if it’s for another parcel
     if (state.panel.style.display !== "none") openPanel();
   }
 
@@ -986,10 +920,8 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     const areaM2 = areaM2FromLayer(parcel);
     const txt = `Size • ${fmtArea(areaM2)}`;
 
-    // outline
     state.sizeOutlineLayer = L.geoJSON(parcel.toGeoJSON(), { style: STYLE.sizeOutline, interactive: false }).addTo(state.map);
 
-    // label near centroid (bounds center)
     const c = parcel.getBounds().getCenter();
     state.sizeLabelMarker = L.marker(c, { interactive: false, opacity: 0.95 }).addTo(state.map);
     state.sizeLabelMarker.bindTooltip(txt, { permanent: true, direction: "top", offset: [0, -8] }).openTooltip();
@@ -1031,7 +963,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     const roll = state.selectedRoll;
     if (!roll) return setStatus("Select a parcel first");
 
-    // If zoomed out, gently zoom in rather than refusing
     const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
     if (state.map.getZoom() < minz) state.map.setZoom(minz, { animate: false });
 
@@ -1042,7 +973,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
       return;
     }
 
-    // Always masked: satellite layer + outside mask
     if (!state.map.hasLayer(state.satellite)) state.satellite.addTo(state.map);
 
     const gj = snow.toGeoJSON();
@@ -1067,7 +997,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     const next = typeof force === "boolean" ? force : !state.drawEnabled;
 
     if (next) {
-      // drawing occurs on satellite backdrop
       if (!state.satOn) toggleSatellite(true);
       if (!state.satOn) return;
       enableDrawMode();
@@ -1089,7 +1018,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     const rec = getRecord(roll);
     if (!rec?.drawingDataUrl) return setStatus("No saved snowbridge for this parcel");
 
-    // Ensure satellite and canvas visible so user sees it
     if (!state.satOn) toggleSatellite(true);
     if (!state.satOn) return;
 
@@ -1103,7 +1031,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     const roll = state.selectedRoll;
     if (!roll) return setStatus("Select a parcel first");
 
-    // require a drawing visible / made
     if (!state.hasUnsavedDrawing && !getRecord(roll)?.drawingDataUrl) {
       return setStatus("Error • no drawing to save");
     }
@@ -1112,15 +1039,13 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     if (!dataUrl || dataUrl.length < 200) return setStatus("Error • drawing capture failed");
 
     const existing = getRecord(roll);
-    // request is required to be “paired” per your spec
     if (!existing?.request) return setStatus("Error • add Request before saving");
 
     setRecord(roll, { ...existing, drawingDataUrl: dataUrl, updatedAt: Date.now() });
     state.hasUnsavedDrawing = false;
-    restyleAllParcels(); // severity fill might already exist; refresh anyway
+    restyleAllParcels();
     setStatus(`Saved snowbridge • roll ${roll}`);
 
-    // After saving, exit draw mode + unlock map
     if (state.drawEnabled) toggleDraw(false);
   }
 
@@ -1148,11 +1073,9 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     const roll = state.selectedRoll;
     if (!roll) return setStatus("Select a parcel first");
 
-    // require drawing observed (either current unsaved strokes or saved drawing)
     const hasDrawing = state.hasUnsavedDrawing || !!getRecord(roll)?.drawingDataUrl;
     if (!hasDrawing) return setStatus("Error • draw snowbridge before Request");
 
-    // simple form (upgrade later to real modal UI)
     const severity = (prompt("Severity (green / yellow / red):", "yellow") || "").toLowerCase().trim();
     const sev = severity === "green" || severity === "yellow" || severity === "red" ? severity : null;
     if (!sev) return setStatus("Error • invalid severity");
@@ -1178,7 +1101,9 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
   async function init() {
     setStatus("Loading…");
 
-    state.cfg = await loadConfigOrFallback();
+    // NOTE: pass status callback so fallback mode message stays identical
+    state.cfg = await loadConfigOrFallback({ onStatus: setStatus });
+
     const joinKey = state.cfg?.data?.joinKey || FALLBACK_CFG.data.joinKey;
     const files = state.cfg?.data?.files || FALLBACK_CFG.data.files;
 
@@ -1204,10 +1129,8 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
     state.map.on("zoomend", () => {
       if (!state.satOn) return;
 
-      // Keep satellite layer present
       if (!state.map.hasLayer(state.satellite)) state.satellite.addTo(state.map);
 
-      // Keep mask/outline present for current selected roll
       const roll = state.selectedRoll;
       if (!roll) return;
 
@@ -1314,7 +1237,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
       const snowGeo = await loadJSON(files.snowZone);
       state.snowLayer = buildSnowLayer(snowGeo, joinKey).addTo(state.map);
 
-      // ensure parcels are on top for interaction
       try {
         state.parcelsLayer.bringToFront();
       } catch {}
@@ -1323,7 +1245,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
       const addrGeo = await loadJSON(files.addresses);
       state.addresses = buildAddressIndex(addrGeo, joinKey);
 
-      // Fit to bounds
       const b = state.parcelsLayer?.getBounds?.();
       if (b && b.isValid && b.isValid()) {
         state.map.fitBounds(b, { padding: [20, 20] });
@@ -1332,7 +1253,6 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
         state.map.setView([sv.lat, sv.lng], sv.zoom);
       }
 
-      // Apply severity coloring from saved records
       restyleAllParcels();
 
       setStatus(`Ready • ${state.addresses.length} addresses • search or click a parcel`);
