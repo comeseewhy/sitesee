@@ -3,10 +3,12 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
 import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
 import { createState } from "./js/core/state.js";
 import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
+
 import { setStatus, hardFail } from "./js/ui/status.js";
 import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./js/ui/suggest.js";
 import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/contextMenu.js";
 import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPanelOpen } from "./js/ui/panel.js";
+
 import {
   polygonLatLngRingsFromGeoJSON,
   createOutsideMaskFromGeom,
@@ -15,10 +17,13 @@ import {
   lockMapInteractions,
 } from "./js/map/geometry.js";
 import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
+import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
 
 /* SnowBridge — app.js (refactor-aligned, behavior preserved)
-   - Uses extracted modules for config/state/storage/ui/data/map helpers.
-   - Uses map/layers.js for parcels/snow layer construction (handler injection).
+   - app.js is the orchestrator/wiring layer:
+       - DOM lookup + event binding
+       - State object + dependency injection
+       - Leaflet map + layers + feature actions
    - GitHub Pages safe: native ES module; no build step.
 */
 
@@ -60,6 +65,48 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
   const setStatus1 = (msg) => setStatus(msg, { maxChars: state.cfg?.ui?.statusLineMaxChars });
 
   // -----------------------------
+  // Styling (preserved)
+  // -----------------------------
+  const STYLE = {
+    idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" },
+    activeParcelA: { weight: 3, opacity: 1, fillOpacity: 0.18, color: "#f59e0b" },
+    activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" },
+    sizeOutline: { weight: 3, opacity: 1, fillOpacity: 0.0, color: "#111827" },
+    snowOutline: { weight: 2, opacity: 1, fillOpacity: 0.0, color: "#ffffff" },
+    // snow base layer style (matches prior buildSnowLayer defaults)
+    snowBase: { weight: 1, opacity: 0.35, fillOpacity: 0.0 },
+  };
+
+  function severityStyleForRoll(roll) {
+    const rec = getRecord(roll);
+    const sev = rec?.request?.severity;
+    if (sev === "red") return { fillColor: "#ef4444", fillOpacity: 0.28 };
+    if (sev === "yellow") return { fillColor: "#f59e0b", fillOpacity: 0.22 };
+    if (sev === "green") return { fillColor: "#10b981", fillOpacity: 0.2 };
+    return { fillColor: null, fillOpacity: null };
+  }
+
+  function applyParcelStyle(roll) {
+    const layer = state.parcelByRoll.get(roll);
+    if (!layer) return;
+
+    const sev = severityStyleForRoll(roll);
+    const base = { ...STYLE.idleParcel };
+    if (sev.fillColor) base.fillColor = sev.fillColor;
+    if (sev.fillOpacity != null) base.fillOpacity = sev.fillOpacity;
+
+    if (state.selectedRoll === roll && state.isQueryStage) {
+      layer.setStyle(state.blinkOn ? { ...base, ...STYLE.activeParcelA } : { ...base, ...STYLE.activeParcelB });
+    } else {
+      layer.setStyle(base);
+    }
+  }
+
+  function restyleAllParcels() {
+    for (const roll of state.parcelByRoll.keys()) applyParcelStyle(roll);
+  }
+
+  // -----------------------------
   // Panel wiring (ui/panel.js)
   // -----------------------------
   function openPanel() {
@@ -68,7 +115,8 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
 
   function closePanel() {
     uiClosePanel();
-    exitQueryStage();
+    // exitQueryStage now lives in map/queryStage.js; call via injected deps
+    exitQueryStage(state, queryDeps.exit);
   }
 
   const panelActions = {
@@ -83,7 +131,7 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
   };
 
   // -----------------------------
-  // Drawing overlay (spray paint)
+  // Draw overlay (spray paint) — preserved
   // -----------------------------
   function ensureDrawCanvas() {
     let c = $("sbCanvas");
@@ -234,46 +282,24 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
   }
 
   // -----------------------------
-  // Styling (preserved)
+  // Query stage wiring (map/queryStage.js)
   // -----------------------------
-  const STYLE = {
-    idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" },
-    activeParcelA: { weight: 3, opacity: 1, fillOpacity: 0.18, color: "#f59e0b" },
-    activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" },
-    sizeOutline: { weight: 3, opacity: 1, fillOpacity: 0.0, color: "#111827" },
-    snowOutline: { weight: 2, opacity: 1, fillOpacity: 0.0, color: "#ffffff" },
-    // snow base layer style (matches prior buildSnowLayer defaults)
-    snowBase: { weight: 1, opacity: 0.35, fillOpacity: 0.0 },
+  const queryDeps = {
+    enter: {
+      hideContextMenu: (menuEl) => hideContextMenu(menuEl),
+      applyParcelStyle,
+      setStatus1,
+      isPanelOpen,
+      openPanel,
+    },
+    exit: {
+      toggleSatellite: (force) => toggleSatellite(force),
+      toggleSize: (force) => toggleSize(force),
+      toggleDraw: (force) => toggleDraw(force),
+      applyParcelStyle,
+      setStatus1,
+    },
   };
-
-  function severityStyleForRoll(roll) {
-    const rec = getRecord(roll);
-    const sev = rec?.request?.severity;
-    if (sev === "red") return { fillColor: "#ef4444", fillOpacity: 0.28 };
-    if (sev === "yellow") return { fillColor: "#f59e0b", fillOpacity: 0.22 };
-    if (sev === "green") return { fillColor: "#10b981", fillOpacity: 0.2 };
-    return { fillColor: null, fillOpacity: null };
-  }
-
-  function applyParcelStyle(roll) {
-    const layer = state.parcelByRoll.get(roll);
-    if (!layer) return;
-
-    const sev = severityStyleForRoll(roll);
-    const base = { ...STYLE.idleParcel };
-    if (sev.fillColor) base.fillColor = sev.fillColor;
-    if (sev.fillOpacity != null) base.fillOpacity = sev.fillOpacity;
-
-    if (state.selectedRoll === roll && state.isQueryStage) {
-      layer.setStyle(state.blinkOn ? { ...base, ...STYLE.activeParcelA } : { ...base, ...STYLE.activeParcelB });
-    } else {
-      layer.setStyle(base);
-    }
-  }
-
-  function restyleAllParcels() {
-    for (const roll of state.parcelByRoll.keys()) applyParcelStyle(roll);
-  }
 
   // -----------------------------
   // Address handling (data/addressIndex.js)
@@ -282,72 +308,7 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
     const q = el.addrInput?.value ?? "";
     const best = getSuggestions(q, state.addresses, 1)[0] || null;
     if (!best) return setStatus1("No match");
-    enterQueryStage(best.roll, { center: [best.lat, best.lng], source: "address" });
-  }
-
-  // -----------------------------
-  // Query stage (slow blink + zoom) — preserved
-  // -----------------------------
-  function stopBlink() {
-    if (state.blinkTimer) window.clearInterval(state.blinkTimer);
-    state.blinkTimer = null;
-    state.blinkOn = false;
-  }
-
-  function startBlink() {
-    stopBlink();
-    state.blinkOn = true;
-    state.blinkTimer = window.setInterval(() => {
-      state.blinkOn = !state.blinkOn;
-      if (state.selectedRoll) applyParcelStyle(state.selectedRoll);
-    }, 650);
-  }
-
-  function fitToRoll(roll) {
-    const padding = state.cfg?.map?.fitPaddingPx ?? 20;
-    const target = state.parcelByRoll.get(roll);
-    if (!target) return;
-    state.map.fitBounds(target.getBounds(), { padding: [padding, padding] });
-  }
-
-  function zoomTight() {
-    const z = Math.max(state.map.getZoom(), state.cfg?.map?.queryZoom ?? 19);
-    state.map.setZoom(z);
-  }
-
-  function enterQueryStage(roll, { center = null, source = "" } = {}) {
-    hideContextMenu(state.ctxMenu);
-
-    const old = state.selectedRoll;
-
-    state.selectedRoll = String(roll);
-    state.isQueryStage = true;
-
-    if (old) applyParcelStyle(old);
-    applyParcelStyle(state.selectedRoll);
-
-    if (center) state.map.setView(center, Math.max(state.map.getZoom(), 17));
-    fitToRoll(state.selectedRoll);
-    zoomTight();
-
-    startBlink();
-    setStatus1(`Query • roll ${state.selectedRoll}${source ? ` • ${source}` : ""}`);
-
-    if (isPanelOpen()) openPanel();
-  }
-
-  function exitQueryStage() {
-    stopBlink();
-    toggleSatellite(false);
-    toggleSize(false);
-    if (state.drawEnabled) toggleDraw(false);
-
-    const roll = state.selectedRoll;
-    state.isQueryStage = false;
-    state.selectedRoll = null;
-
-    if (roll) applyParcelStyle(roll);
-    setStatus1("Ready • search or click a parcel");
+    enterQueryStage(state, best.roll, { center: [best.lat, best.lng], source: "address" }, queryDeps.enter);
   }
 
   // -----------------------------
@@ -580,7 +541,7 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
       return;
     }
 
-    enterQueryStage(roll, { source: "left-click" });
+    enterQueryStage(state, roll, { source: "left-click" }, queryDeps.enter);
   }
 
   function onParcelContextMenu({ roll, pxX, pxY }) {
@@ -589,7 +550,7 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
     showContextMenuAt(
       pxX,
       pxY,
-      [{ label: "View", onClick: () => enterQueryStage(roll, { source: "right-click" }) }],
+      [{ label: "View", onClick: () => enterQueryStage(state, roll, { source: "right-click" }, queryDeps.enter) }],
       { menu: state.ctxMenu }
     );
   }
@@ -675,11 +636,10 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
     if (el.addrBtn) el.addrBtn.addEventListener("click", onGo);
 
     if (el.addrInput) {
-      // Create injected suggest wiring (preserves previous behavior)
       const suggest = createSuggestHandlers(el.addrInput, /** @type {HTMLDivElement} */ (state.suggestBox), {
         getMatches: (q) => getSuggestions(q || "", state.addresses, 12),
         onPick: () => {
-          // app.js previously only filled input + hid; no extra side effects here
+          // preserved: app.js previously only filled input + hid; no extra side effects
         },
         onGo,
         getIndex: () => state.suggestIndex,
@@ -703,7 +663,6 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
       setStatus1("Loading parcels…");
       const parcelsGeo = await loadJSON(files.parcels);
 
-      // NOTE: uses extracted map/layers.js (handler injection)
       state.parcelsLayer = buildParcelsLayer(parcelsGeo, joinKey, {
         L,
         state,
@@ -715,7 +674,6 @@ import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
       setStatus1("Loading +8m snow zone…");
       const snowGeo = await loadJSON(files.snowZone);
 
-      // NOTE: snow layer is non-interactive by design
       state.snowLayer = buildSnowLayer(snowGeo, joinKey, {
         L,
         state,
