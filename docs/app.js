@@ -186,11 +186,12 @@
       const ring = Array.isArray(latlngs?.[0]?.[0]) ? latlngs[0][0] : latlngs[0];
       if (!ring || ring.length < 3) return null;
 
-      const pts = ring.map(ll => map.project(ll, map.getMaxZoom()));
+      const pts = ring.map((ll) => map.project(ll, map.getMaxZoom()));
       let sum = 0;
       for (let i = 0; i < pts.length; i++) {
-        const a = pts[i], b = pts[(i + 1) % pts.length];
-        sum += (a.x * b.y - b.x * a.y);
+        const a = pts[i],
+          b = pts[(i + 1) % pts.length];
+        sum += a.x * b.y - b.x * a.y;
       }
       const pxArea = Math.abs(sum / 2);
       // Convert pixel² to meters² using CRS scale at maxZoom
@@ -211,6 +212,31 @@
     return `${m2.toFixed(0)} m²`;
   }
 
+  // Lock/unlock Leaflet map interactions (used for Draw mode)
+  function lockMapInteractions(lock) {
+    const m = state.map;
+    if (!m) return;
+
+    const set = (handler, enabledWhenUnlocked) => {
+      if (!handler) return;
+      try {
+        enabledWhenUnlocked ? handler.enable() : handler.disable();
+      } catch {}
+    };
+
+    set(m.dragging, !lock);
+    set(m.scrollWheelZoom, !lock);
+    set(m.doubleClickZoom, !lock);
+    set(m.boxZoom, !lock);
+    set(m.keyboard, !lock);
+    set(m.touchZoom, !lock);
+    set(m.tap, !lock);
+
+    try {
+      if (lock) m.stop();
+    } catch {}
+  }
+
   // -----------------------------
   // Storage (local only)
   // -----------------------------
@@ -220,7 +246,7 @@
     try {
       const raw = localStorage.getItem(LS_KEY);
       const obj = raw ? JSON.parse(raw) : {};
-      return (obj && typeof obj === "object") ? obj : {};
+      return obj && typeof obj === "object" ? obj : {};
     } catch {
       return {};
     }
@@ -247,6 +273,24 @@
     const db = loadDB();
     delete db[String(roll)];
     saveDB(db);
+  }
+
+  // -----------------------------
+  // UI storage (panel geometry)
+  // -----------------------------
+  const LS_UI_KEY = "snowbridge_ui_v1";
+
+  function loadUI() {
+    try {
+      return JSON.parse(localStorage.getItem(LS_UI_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  }
+
+  function saveUI(partial) {
+    const cur = loadUI();
+    localStorage.setItem(LS_UI_KEY, JSON.stringify({ ...cur, ...partial }));
   }
 
   // -----------------------------
@@ -284,7 +328,7 @@
 
   function setActiveRow(box, idx) {
     const kids = Array.from(box.children);
-    kids.forEach((node, i) => node.style.background = (i === idx) ? "#e5e7eb" : "transparent");
+    kids.forEach((node, i) => (node.style.background = i === idx ? "#e5e7eb" : "transparent"));
   }
 
   function renderSuggestions(box, items, onPick) {
@@ -353,9 +397,12 @@
       row.textContent = it.label;
       row.style.padding = "10px 12px";
       row.style.cursor = "pointer";
-      row.addEventListener("mouseenter", () => row.style.background = "#f3f4f6");
-      row.addEventListener("mouseleave", () => row.style.background = "transparent");
-      row.addEventListener("click", () => { hideContextMenu(); it.onClick(); });
+      row.addEventListener("mouseenter", () => (row.style.background = "#f3f4f6"));
+      row.addEventListener("mouseleave", () => (row.style.background = "transparent"));
+      row.addEventListener("click", () => {
+        hideContextMenu();
+        it.onClick();
+      });
       cm.appendChild(row);
     }
 
@@ -406,9 +453,19 @@
     p.appendChild(body);
     document.body.appendChild(p);
 
+    // restore last panel position/size
+    const ui = loadUI();
+    if (ui.panelLeft) p.style.left = ui.panelLeft;
+    if (ui.panelTop) p.style.top = ui.panelTop;
+    if (ui.panelWidth) p.style.width = ui.panelWidth;
+    if (ui.panelHeight) p.style.height = ui.panelHeight;
+
     // drag logic
     let dragging = false;
-    let startX = 0, startY = 0, startL = 0, startT = 0;
+    let startX = 0,
+      startY = 0,
+      startL = 0,
+      startT = 0;
 
     header.addEventListener("mousedown", (e) => {
       dragging = true;
@@ -428,7 +485,27 @@
       p.style.top = `${Math.round(startT + dy)}px`;
     });
 
-    window.addEventListener("mouseup", () => { dragging = false; });
+    window.addEventListener("mouseup", () => {
+      dragging = false;
+      saveUI({
+        panelLeft: p.style.left,
+        panelTop: p.style.top,
+        panelWidth: p.style.width,
+        panelHeight: p.style.height,
+      });
+    });
+
+    // optional: more reliable size persistence
+    try {
+      new ResizeObserver(() => {
+        saveUI({
+          panelLeft: p.style.left,
+          panelTop: p.style.top,
+          panelWidth: p.style.width,
+          panelHeight: p.style.height,
+        });
+      }).observe(p);
+    } catch {}
 
     return p;
   }
@@ -455,8 +532,8 @@
       b.style.border = "1px solid #d1d5db";
       b.style.background = "#f9fafb";
       b.style.cursor = "pointer";
-      b.addEventListener("mouseenter", () => b.style.background = "#f3f4f6");
-      b.addEventListener("mouseleave", () => b.style.background = "#f9fafb");
+      b.addEventListener("mouseenter", () => (b.style.background = "#f3f4f6"));
+      b.addEventListener("mouseleave", () => (b.style.background = "#f9fafb"));
       return b;
     };
 
@@ -580,29 +657,48 @@
 
   function enableDrawMode() {
     state.drawEnabled = true;
+
+    // Ensure satellite is on (drawing is on satellite)
+    if (!state.satOn) toggleSatellite(true);
+    if (!state.satOn) return;
+
+    // Lock map movement while drawing
+    lockMapInteractions(true);
+
+    // Force tight view: center parcel + zoom 22
+    const roll = state.selectedRoll;
+    const parcel = roll ? state.parcelByRoll.get(roll) : null;
+    if (parcel) {
+      const c = parcel.getBounds().getCenter();
+      state.map.setView(c, 22, { animate: false });
+    } else {
+      state.map.setZoom(22, { animate: false });
+    }
+
     state.canvas.style.display = "block";
     state.canvas.style.pointerEvents = "auto";
-
-    // cursor hint
     state.canvas.style.cursor = "crosshair";
+
     setStatus(`Draw ON • roll ${state.selectedRoll}`);
 
     let drawing = false;
 
-    const brushR = 10; // spray radius
+    // Bigger spray
+    const brushR = 18; // was 10
+    const dotsPerSpray = 26; // was 14
+
     const ctx = state.canvas.getContext("2d");
     ctx.globalCompositeOperation = "source-over";
     ctx.fillStyle = "rgba(255,255,255,0.35)";
 
     const spray = (x, y) => {
-      // spray = multiple dots for textured feel
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < dotsPerSpray; i++) {
         const a = Math.random() * Math.PI * 2;
         const r = Math.random() * brushR;
         const dx = Math.cos(a) * r;
         const dy = Math.sin(a) * r;
         ctx.beginPath();
-        ctx.arc(x + dx, y + dy, 1.2, 0, Math.PI * 2);
+        ctx.arc(x + dx, y + dy, 1.4, 0, Math.PI * 2);
         ctx.fill();
       }
     };
@@ -628,7 +724,9 @@
       state.hasUnsavedDrawing = true;
     };
 
-    const onUp = () => { drawing = false; };
+    const onUp = () => {
+      drawing = false;
+    };
 
     state.canvas.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
@@ -640,6 +738,10 @@
 
   function disableDrawMode() {
     state.drawEnabled = false;
+
+    // Unlock map movement again
+    lockMapInteractions(false);
+
     state.canvas.style.pointerEvents = "none";
     state.canvas.style.cursor = "default";
     setStatus(`Draw OFF • roll ${state.selectedRoll}`);
@@ -777,8 +879,8 @@
       const s = scoreAddressCandidate(qNorm, r.norm);
       if (s > 0) scored.push({ r, s });
     }
-    scored.sort((a, b) => (b.s !== a.s) ? (b.s - a.s) : a.r.label.localeCompare(b.r.label));
-    return scored.slice(0, limit).map(x => x.r);
+    scored.sort((a, b) => (b.s !== a.s) ? b.s - a.s : a.r.label.localeCompare(b.r.label));
+    return scored.slice(0, limit).map((x) => x.r);
   }
 
   function onGo() {
@@ -818,9 +920,7 @@
           const r = String(roll);
           const px = e.originalEvent?.clientX ?? 0;
           const py = e.originalEvent?.clientY ?? 0;
-          showContextMenuAt(px, py, [
-            { label: "View", onClick: () => enterQueryStage(r, { source: "right-click" }) },
-          ]);
+          showContextMenuAt(px, py, [{ label: "View", onClick: () => enterQueryStage(r, { source: "right-click" }) }]);
         });
       },
     });
@@ -910,12 +1010,18 @@
   // Size toggle
   // -----------------------------
   function clearSizeOverlays() {
-    if (state.sizeOutlineLayer) { try { state.map.removeLayer(state.sizeOutlineLayer); } catch {} state.sizeOutlineLayer = null; }
-    if (state.sizeLabelMarker) { try { state.map.removeLayer(state.sizeLabelMarker); } catch {} state.sizeLabelMarker = null; }
+    if (state.sizeOutlineLayer) {
+      try { state.map.removeLayer(state.sizeOutlineLayer); } catch {}
+      state.sizeOutlineLayer = null;
+    }
+    if (state.sizeLabelMarker) {
+      try { state.map.removeLayer(state.sizeLabelMarker); } catch {}
+      state.sizeLabelMarker = null;
+    }
   }
 
   function toggleSize(force) {
-    const next = (typeof force === "boolean") ? force : !state.sizeOn;
+    const next = typeof force === "boolean" ? force : !state.sizeOn;
     state.sizeOn = next;
 
     clearSizeOverlays();
@@ -949,17 +1055,23 @@
   // Satellite masked toggle (ONLY via panel)
   // -----------------------------
   function clearViewOverlays() {
-    if (state.maskLayer) { try { state.map.removeLayer(state.maskLayer); } catch {} state.maskLayer = null; }
-    if (state.snowOutlineLayer) { try { state.map.removeLayer(state.snowOutlineLayer); } catch {} state.snowOutlineLayer = null; }
+    if (state.maskLayer) {
+      try { state.map.removeLayer(state.maskLayer); } catch {}
+      state.maskLayer = null;
+    }
+    if (state.snowOutlineLayer) {
+      try { state.map.removeLayer(state.snowOutlineLayer); } catch {}
+      state.snowOutlineLayer = null;
+    }
   }
 
   function canUseSatelliteNow() {
     const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
-    return (state.map.getZoom() >= minz);
+    return state.map.getZoom() >= minz;
   }
 
   function toggleSatellite(force) {
-    const next = (typeof force === "boolean") ? force : !state.satOn;
+    const next = typeof force === "boolean" ? force : !state.satOn;
     state.satOn = next;
 
     clearViewOverlays();
@@ -973,12 +1085,9 @@
     const roll = state.selectedRoll;
     if (!roll) return setStatus("Select a parcel first");
 
-    if (!canUseSatelliteNow()) {
-      const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
-      setStatus(`Zoom in to ${minz}+ for satellite`);
-      state.satOn = false;
-      return;
-    }
+    // If zoomed out, gently zoom in rather than refusing
+    const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
+    if (state.map.getZoom() < minz) state.map.setZoom(minz, { animate: false });
 
     const snow = state.snowByRoll.get(roll);
     if (!snow) {
@@ -1009,12 +1118,12 @@
   // Draw toggle
   // -----------------------------
   function toggleDraw(force) {
-    const next = (typeof force === "boolean") ? force : !state.drawEnabled;
+    const next = typeof force === "boolean" ? force : !state.drawEnabled;
 
     if (next) {
-      // You asked: drawing occurs on satellite backdrop. If sat isn't on, turn it on.
+      // drawing occurs on satellite backdrop
       if (!state.satOn) toggleSatellite(true);
-      if (!state.satOn) return; // failed to enable sat (zoom too low etc.)
+      if (!state.satOn) return;
       enableDrawMode();
       return;
     }
@@ -1064,6 +1173,9 @@
     state.hasUnsavedDrawing = false;
     restyleAllParcels(); // severity fill might already exist; refresh anyway
     setStatus(`Saved snowbridge • roll ${roll}`);
+
+    // After saving, exit draw mode + unlock map
+    if (state.drawEnabled) toggleDraw(false);
   }
 
   function deleteSnowbridge() {
@@ -1096,7 +1208,7 @@
 
     // simple form (upgrade later to real modal UI)
     const severity = (prompt("Severity (green / yellow / red):", "yellow") || "").toLowerCase().trim();
-    const sev = (severity === "green" || severity === "yellow" || severity === "red") ? severity : null;
+    const sev = severity === "green" || severity === "yellow" || severity === "red" ? severity : null;
     if (!sev) return setStatus("Error • invalid severity");
 
     const seniors = (prompt("Seniors/at-risk on site? (yes/no):", "no") || "").toLowerCase().startsWith("y");
@@ -1142,6 +1254,33 @@
     satOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
     state.satellite = L.tileLayer(satUrl, satOpt);
 
+    // Keep satellite + mask sticky once enabled
+    state.map.on("zoomend", () => {
+      if (!state.satOn) return;
+
+      // Keep satellite layer present
+      if (!state.map.hasLayer(state.satellite)) state.satellite.addTo(state.map);
+
+      // Keep mask/outline present for current selected roll
+      const roll = state.selectedRoll;
+      if (!roll) return;
+
+      const snow = state.snowByRoll.get(roll);
+      if (!snow) return;
+
+      if (!state.maskLayer || !state.snowOutlineLayer) {
+        clearViewOverlays();
+
+        const gj = snow.toGeoJSON();
+        const geom = gj?.geometry;
+        const rings = polygonLatLngRingsFromGeoJSON(geom);
+        if (!rings) return;
+
+        state.maskLayer = createOutsideMaskFromGeom(geom, rings).addTo(state.map);
+        state.snowOutlineLayer = L.geoJSON(gj, { style: STYLE.snowOutline, interactive: false }).addTo(state.map);
+      }
+    });
+
     // UI
     state.suggestBox = ensureSuggestBox();
     state.ctxMenu = ensureContextMenu();
@@ -1149,8 +1288,12 @@
     state.canvas = ensureDrawCanvas();
 
     // Canvas sizing
-    state.map.on("resize", () => { resizeCanvasToMap(); });
-    state.map.on("move", () => { /* keep canvas fixed to container */ });
+    state.map.on("resize", () => {
+      resizeCanvasToMap();
+    });
+    state.map.on("move", () => {
+      /* keep canvas fixed to container */
+    });
     resizeCanvasToMap();
 
     // Hide ctx menu on click elsewhere
@@ -1213,7 +1356,11 @@
     }
 
     window.addEventListener("resize", () => positionSuggestBox(state.suggestBox));
-    window.addEventListener("scroll", () => positionSuggestBox(state.suggestBox), true);
+    window.addEventListener(
+      "scroll",
+      () => positionSuggestBox(state.suggestBox),
+      true
+    );
 
     // Load data
     try {
@@ -1226,7 +1373,9 @@
       state.snowLayer = buildSnowLayer(snowGeo, joinKey).addTo(state.map);
 
       // ensure parcels are on top for interaction
-      try { state.parcelsLayer.bringToFront(); } catch {}
+      try {
+        state.parcelsLayer.bringToFront();
+      } catch {}
 
       setStatus("Loading addresses…");
       const addrGeo = await loadJSON(files.addresses);
