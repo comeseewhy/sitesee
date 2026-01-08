@@ -1,55 +1,65 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>SiteSee</title>
+  <title>SnowBridge</title>
 
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Leaflet -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-o9N1j7kP6+1hYbK6mJ6GmY8tC2vNh+lXkG4J1CWo5jA="
+    crossorigin=""
+  />
+
+  <!-- App styles -->
   <link rel="stylesheet" href="./styles.css" />
 </head>
+
 <body>
+  <!-- TOP BAR : single-line control surface -->
   <div id="topbar">
-    <div class="row">
-      <input id="searchInput" placeholder="Search an address (e.g., Simcoe, ON)" />
-      <button id="searchBtn">Search</button>
-      <button id="copyLinkBtn" title="Copy shareable link">Copy link</button>
-    </div>
 
-    <div class="row">
-      <label>Basemap:</label>
-      <select id="basemapSelect">
-        <option value="streets">Streets</option>
-        <option value="satellite">Satellite</option>
-      </select>
+    <!-- Address search -->
+    <input
+      id="addrInput"
+      type="text"
+      placeholder="Search Waterford address…"
+      autocomplete="off"
+    />
 
-      <label>Year:</label>
-      <select id="yearSelect">
-        <option value="">Any</option>
-        <option>2020</option>
-        <option>2021</option>
-        <option>2022</option>
-        <option>2023</option>
-        <option>2024</option>
-        <option>2025</option>
-      </select>
+    <button id="addrBtn">Go</button>
 
-      <label>Product:</label>
-      <select id="productSelect">
-        <option value="boundary">Boundary</option>
-        <option value="sample">Sample</option>
-        <!-- Later: ndvi, landcover, floodplain, etc -->
-      </select>
+    <!-- Highlight mode -->
+    <label class="toggle">
+      <input id="modeToggle" type="checkbox" />
+      Snow zone
+    </label>
 
-      <button id="applyLayerBtn">Load layer</button>
-    </div>
+    <!-- Satellite toggle -->
+    <label class="toggle">
+      <input id="satToggle" type="checkbox" />
+      Satellite
+    </label>
 
-    <div id="status"></div>
+    <!-- Status line (always 1 line) -->
+    <span id="status">Loading…</span>
+
   </div>
 
+  <!-- MAP -->
   <div id="map"></div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Libraries -->
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-o8ljS3dD8F6yX8Lkz2SleqU9jwELyhl725LLJoPLD114="
+    crossorigin=""
+  ></script>
+
+  <!-- App logic -->
   <script src="./app.js"></script>
 </body>
 </html>
