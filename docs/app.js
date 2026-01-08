@@ -1,6 +1,7 @@
 import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } from "./js/core/storage.js";
 import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
 import { createState } from "./js/core/state.js";
+import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -47,48 +48,13 @@ import { createState } from "./js/core/state.js";
   }
 
   // -----------------------------
-  // State (moved to core/state.js)
+  // State
   // -----------------------------
   const state = createState();
 
   // -----------------------------
-  // Utility
+  // Geometry helpers (still in app.js for now)
   // -----------------------------
-  function normalizeAddr(s) {
-    return String(s ?? "")
-      .toUpperCase()
-      .replace(/[.,]/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  function tokenizeNorm(norm) {
-    return norm.split(" ").filter(Boolean);
-  }
-
-  function scoreAddressCandidate(qNorm, candNorm) {
-    if (!qNorm || !candNorm) return -Infinity;
-    if (candNorm === qNorm) return 1000;
-    if (candNorm.startsWith(qNorm)) return 800;
-
-    const qTokens = tokenizeNorm(qNorm);
-    const cTokens = tokenizeNorm(candNorm);
-
-    let score = 0;
-    for (const qt of qTokens) {
-      if (!qt) continue;
-      let best = 0;
-      for (const ct of cTokens) {
-        if (ct === qt) best = Math.max(best, 60);
-        else if (ct.startsWith(qt)) best = Math.max(best, 40);
-        else if (ct.includes(qt)) best = Math.max(best, 10);
-      }
-      score += best;
-    }
-    if (candNorm.includes(qNorm)) score += 120;
-    return score;
-  }
-
   function polygonLatLngRingsFromGeoJSON(geom) {
     if (!geom) return null;
     const toLatLngRing = (ring) => ring.map(([lng, lat]) => [lat, lng]);
@@ -333,11 +299,10 @@ import { createState } from "./js/core/state.js";
     p.style.borderRadius = "12px";
     p.style.boxShadow = "0 14px 34px rgba(0,0,0,0.16)";
     p.style.overflow = "auto";
-    p.style.resize = "both"; // draggable sides/corners (browser-native)
+    p.style.resize = "both";
     p.style.minWidth = "260px";
     p.style.minHeight = "220px";
 
-    // header (drag handle)
     const header = document.createElement("div");
     header.id = "sbPanelHeader";
     header.style.cursor = "move";
@@ -396,7 +361,6 @@ import { createState } from "./js/core/state.js";
       });
     });
 
-    // optional: more reliable size persistence
     try {
       new ResizeObserver(() => {
         saveUI({
@@ -415,7 +379,6 @@ import { createState } from "./js/core/state.js";
     const p = state.panel;
     const body = $("sbPanelBody");
     const roll = state.selectedRoll;
-
     if (!roll) return;
 
     $("sbPanelHeader").textContent = `SnowBridge • ${roll}`;
@@ -447,42 +410,34 @@ import { createState } from "./js/core/state.js";
       return d;
     };
 
-    // View Size (toggle)
     const bSize = mkBtn("View size (toggle)");
     bSize.onclick = () => toggleSize();
     body.appendChild(bSize);
 
-    // View Satellite (toggle)
     const bSat = mkBtn("View satellite (toggle)");
     bSat.onclick = () => toggleSatellite();
     body.appendChild(bSat);
 
-    // Draw (toggle)
     const bDraw = mkBtn("Draw snowbridge (toggle)");
     bDraw.onclick = () => toggleDraw();
     body.appendChild(bDraw);
 
-    // Save
     const bSave = mkBtn("Save snowbridge");
     bSave.onclick = () => saveSnowbridge();
     body.appendChild(bSave);
 
-    // View saved
     const bView = mkBtn("View snowbridge");
     bView.onclick = () => viewSnowbridge();
     body.appendChild(bView);
 
-    // Request
     const bReq = mkBtn("Request");
     bReq.onclick = () => openRequestForm();
     body.appendChild(bReq);
 
-    // Delete
     const bDel = mkBtn("Delete snowbridge");
     bDel.onclick = () => deleteSnowbridge();
     body.appendChild(bDel);
 
-    // Exit
     const bExit = mkBtn("Exit");
     bExit.onclick = () => closePanel();
     body.appendChild(bExit);
@@ -509,8 +464,8 @@ import { createState } from "./js/core/state.js";
     c.style.position = "absolute";
     c.style.left = "0";
     c.style.top = "0";
-    c.style.zIndex = "8000"; // above tiles, below panel/menu
-    c.style.pointerEvents = "none"; // only enabled during draw mode
+    c.style.zIndex = "8000";
+    c.style.pointerEvents = "none";
     c.style.display = "none";
 
     el.map.appendChild(c);
@@ -664,7 +619,7 @@ import { createState } from "./js/core/state.js";
     const sev = rec?.request?.severity;
     if (sev === "red") return { fillColor: "#ef4444", fillOpacity: 0.28 };
     if (sev === "yellow") return { fillColor: "#f59e0b", fillOpacity: 0.22 };
-    if (sev === "green") return { fillColor: "#10b981", fillOpacity: 0.20 };
+    if (sev === "green") return { fillColor: "#10b981", fillOpacity: 0.2 };
     return { fillColor: null, fillOpacity: null };
   }
 
@@ -689,45 +644,11 @@ import { createState } from "./js/core/state.js";
   }
 
   // -----------------------------
-  // Address handling
+  // Address handling (now uses data/addressIndex.js)
   // -----------------------------
-  function buildAddressIndex(addrGeo, joinKey) {
-    const rows = [];
-    for (const f of addrGeo.features || []) {
-      const p = f.properties || {};
-      const g = f.geometry;
-      if (!g || g.type !== "Point" || !Array.isArray(g.coordinates)) continue;
-
-      const roll = p[joinKey];
-      if (roll == null) continue;
-
-      const label = p.full_addr ?? p.FULL_ADDR ?? p.FULLADDR ?? p.ADDR_FULL ?? p.ADDRESS ?? "";
-      const [lng, lat] = g.coordinates;
-      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
-
-      const txt = String(label).trim();
-      if (!txt) continue;
-
-      rows.push({ label: txt, norm: normalizeAddr(txt), roll: String(roll), lat, lng });
-    }
-    return rows;
-  }
-
-  function getSuggestions(query, limit = 12) {
-    const qNorm = normalizeAddr(query);
-    if (!qNorm) return [];
-    const scored = [];
-    for (const r of state.addresses) {
-      const s = scoreAddressCandidate(qNorm, r.norm);
-      if (s > 0) scored.push({ r, s });
-    }
-    scored.sort((a, b) => (b.s !== a.s ? b.s - a.s : a.r.label.localeCompare(b.r.label)));
-    return scored.slice(0, limit).map((x) => x.r);
-  }
-
   function onGo() {
     const q = el.addrInput?.value ?? "";
-    const best = getSuggestions(q, 1)[0] || null;
+    const best = getSuggestions(q, state.addresses, 1)[0] || null;
     if (!best) return setStatus("No match");
     enterQueryStage(best.roll, { center: [best.lat, best.lng], source: "address" });
   }
@@ -909,11 +830,6 @@ import { createState } from "./js/core/state.js";
     }
   }
 
-  function canUseSatelliteNow() {
-    const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
-    return state.map.getZoom() >= minz;
-  }
-
   function toggleSatellite(force) {
     const next = typeof force === "boolean" ? force : !state.satOn;
     state.satOn = next;
@@ -1067,7 +983,6 @@ import { createState } from "./js/core/state.js";
   async function init() {
     setStatus("Loading…");
 
-    // NOTE: pass status callback so fallback mode message stays identical
     state.cfg = await loadConfigOrFallback({ onStatus: setStatus });
 
     const joinKey = state.cfg?.data?.joinKey || FALLBACK_CFG.data.joinKey;
@@ -1123,9 +1038,7 @@ import { createState } from "./js/core/state.js";
     state.canvas = ensureDrawCanvas();
 
     // Canvas sizing
-    state.map.on("resize", () => {
-      resizeCanvasToMap();
-    });
+    state.map.on("resize", () => resizeCanvasToMap());
     state.map.on("move", () => {
       /* keep canvas fixed to container */
     });
@@ -1169,7 +1082,7 @@ import { createState } from "./js/core/state.js";
 
       el.addrInput.addEventListener("input", () => {
         const q = el.addrInput.value || "";
-        const matches = getSuggestions(q, 12);
+        const matches = getSuggestions(q, state.addresses, 12);
         state.suggestIndex = -1;
         renderSuggestions(state.suggestBox, matches, (picked) => {
           el.addrInput.value = picked.label;
@@ -1180,7 +1093,7 @@ import { createState } from "./js/core/state.js";
 
       el.addrInput.addEventListener("focus", () => {
         const q = el.addrInput.value || "";
-        const matches = getSuggestions(q, 12);
+        const matches = getSuggestions(q, state.addresses, 12);
         state.suggestIndex = -1;
         renderSuggestions(state.suggestBox, matches, (picked) => {
           el.addrInput.value = picked.label;
@@ -1209,7 +1122,10 @@ import { createState } from "./js/core/state.js";
 
       setStatus("Loading addresses…");
       const addrGeo = await loadJSON(files.addresses);
-      state.addresses = buildAddressIndex(addrGeo, joinKey);
+
+      state.addresses = buildAddressIndex(addrGeo, joinKey, {
+        labelFieldsPriority: state.cfg?.data?.addressLabelFieldsPriority,
+      });
 
       const b = state.parcelsLayer?.getBounds?.();
       if (b && b.isValid && b.isValid()) {
