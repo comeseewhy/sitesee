@@ -7,6 +7,13 @@ import { setStatus, hardFail } from "./js/ui/status.js";
 import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./js/ui/suggest.js";
 import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/contextMenu.js";
 import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPanelOpen } from "./js/ui/panel.js";
+import {
+  polygonLatLngRingsFromGeoJSON,
+  createOutsideMaskFromGeom,
+  areaM2FromLayer,
+  fmtArea,
+  lockMapInteractions,
+} from "./js/map/geometry.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -53,114 +60,6 @@ import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPa
 
   // Single-line status wrapper (optional max chars from config; preserves behavior when unset)
   const setStatus1 = (msg) => setStatus(msg, { maxChars: state.cfg?.ui?.statusLineMaxChars });
-
-  // -----------------------------
-  // Geometry helpers (still in app.js for now)
-  // -----------------------------
-  function polygonLatLngRingsFromGeoJSON(geom) {
-    if (!geom) return null;
-    const toLatLngRing = (ring) => ring.map(([lng, lat]) => [lat, lng]);
-
-    if (geom.type === "Polygon") return geom.coordinates.map(toLatLngRing);
-    if (geom.type === "MultiPolygon") return geom.coordinates.map((poly) => poly.map(toLatLngRing));
-    return null;
-  }
-
-  function createOutsideMaskFromGeom(geom, ringsOrPolys) {
-    const outerWorld = [
-      [85, -180],
-      [85, 180],
-      [-85, 180],
-      [-85, -180],
-    ];
-
-    const holes = [];
-    if (geom.type === "Polygon") {
-      if (ringsOrPolys?.[0]?.length) holes.push(ringsOrPolys[0]);
-    } else {
-      for (const rings of ringsOrPolys || []) {
-        if (rings?.[0]?.length) holes.push(rings[0]);
-      }
-    }
-
-    return L.polygon([outerWorld, ...holes], {
-      stroke: false,
-      fill: true,
-      fillOpacity: 0.65,
-      interactive: false,
-    });
-  }
-
-  // Simple polygon area in m² (planar approx) using Leaflet’s geometry util if present; else fallback
-  function areaM2FromLayer(layer) {
-    try {
-      const gj = layer.toGeoJSON();
-      const geom = gj?.geometry;
-      if (!geom) return null;
-
-      // If Leaflet’s built-in geometry util exists (not always), use it:
-      if (L.GeometryUtil?.geodesicArea) {
-        const latlngs = layer.getLatLngs();
-        // latlngs structure varies; take first ring of first polygon
-        const ring = Array.isArray(latlngs?.[0]?.[0]) ? latlngs[0][0] : latlngs[0];
-        if (Array.isArray(ring) && ring.length >= 3) return Math.abs(L.GeometryUtil.geodesicArea(ring));
-      }
-
-      // Fallback: very rough by projected pixels at current zoom (good enough for “size view”)
-      const map = state.map;
-      const latlngs = layer.getLatLngs();
-      const ring = Array.isArray(latlngs?.[0]?.[0]) ? latlngs[0][0] : latlngs[0];
-      if (!ring || ring.length < 3) return null;
-
-      const pts = ring.map((ll) => map.project(ll, map.getMaxZoom()));
-      let sum = 0;
-      for (let i = 0; i < pts.length; i++) {
-        const a = pts[i],
-          b = pts[(i + 1) % pts.length];
-        sum += a.x * b.y - b.x * a.y;
-      }
-      const pxArea = Math.abs(sum / 2);
-      // Convert pixel² to meters² using CRS scale at maxZoom
-      const scale = map.options.crs.scale(map.getMaxZoom());
-      const metersPerPx = 40075016.68557849 / scale; // Earth circumference / scale
-      return pxArea * metersPerPx * metersPerPx;
-    } catch (e) {
-      console.warn("Area calc failed", e);
-      return null;
-    }
-  }
-
-  function fmtArea(m2) {
-    if (!Number.isFinite(m2)) return "n/a";
-    const acres = m2 / 4046.8564224;
-    if (acres >= 1) return `${acres.toFixed(2)} acres`;
-    return `${m2.toFixed(0)} m²`;
-  }
-
-  // Lock/unlock Leaflet map interactions (used for Draw mode)
-  function lockMapInteractions(lock) {
-    const m = state.map;
-    if (!m) return;
-
-    const set = (handler, enabledWhenUnlocked) => {
-      if (!handler) return;
-      try {
-        enabledWhenUnlocked ? handler.enable() : handler.disable();
-      } catch {}
-    };
-
-    set(m.dragging, !lock);
-    set(m.scrollWheelZoom, !lock);
-    set(m.doubleClickZoom, !lock);
-    set(m.boxZoom, !lock);
-    set(m.keyboard, !lock);
-    set(m.touchZoom, !lock);
-    set(m.tap, !lock);
-
-    try {
-      if (lock) m.stop();
-    } catch {}
-  }
 
   // -----------------------------
   // Panel wiring (ui/panel.js)
@@ -248,7 +147,7 @@ import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPa
     if (!state.satOn) toggleSatellite(true);
     if (!state.satOn) return;
 
-    lockMapInteractions(true);
+    lockMapInteractions(true, state.map);
 
     const roll = state.selectedRoll;
     const parcel = roll ? state.parcelByRoll.get(roll) : null;
@@ -321,7 +220,7 @@ import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPa
   function disableDrawMode() {
     state.drawEnabled = false;
 
-    lockMapInteractions(false);
+    lockMapInteractions(false, state.map);
 
     state.canvas.style.pointerEvents = "none";
     state.canvas.style.cursor = "default";
@@ -540,7 +439,7 @@ import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPa
     const parcel = state.parcelByRoll.get(roll);
     if (!parcel) return setStatus1("Parcel not found");
 
-    const areaM2 = areaM2FromLayer(parcel);
+    const areaM2 = areaM2FromLayer(parcel, { L, map: state.map });
     const txt = `Size • ${fmtArea(areaM2)}`;
 
     state.sizeOutlineLayer = L.geoJSON(parcel.toGeoJSON(), { style: STYLE.sizeOutline, interactive: false }).addTo(state.map);
@@ -606,7 +505,14 @@ import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPa
       return;
     }
 
-    state.maskLayer = createOutsideMaskFromGeom(geom, rings).addTo(state.map);
+    const mask = createOutsideMaskFromGeom(geom, rings, L);
+    if (!mask) {
+      state.satOn = false;
+      setStatus1("Unable to create mask layer");
+      return;
+    }
+
+    state.maskLayer = mask.addTo(state.map);
     state.snowOutlineLayer = L.geoJSON(gj, { style: STYLE.snowOutline, interactive: false }).addTo(state.map);
 
     setStatus1(`Satellite ON • roll ${roll}`);
@@ -766,7 +672,10 @@ import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPa
         const rings = polygonLatLngRingsFromGeoJSON(geom);
         if (!rings) return;
 
-        state.maskLayer = createOutsideMaskFromGeom(geom, rings).addTo(state.map);
+        const mask = createOutsideMaskFromGeom(geom, rings, L);
+        if (!mask) return;
+
+        state.maskLayer = mask.addTo(state.map);
         state.snowOutlineLayer = L.geoJSON(gj, { style: STYLE.snowOutline, interactive: false }).addTo(state.map);
       }
     });
