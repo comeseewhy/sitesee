@@ -1,5 +1,5 @@
-// docs/app.js
-import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } from "./js/core/storage.js";
+// docs/app.js (refactored orchestrator — integrates features/records.js)
+import { loadUI, saveUI, getRecord, setRecord, deleteRecord } from "./js/core/storage.js";
 import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
 import { createState } from "./js/core/state.js";
 import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
@@ -9,10 +9,6 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
 import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/contextMenu.js";
 import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPanelOpen } from "./js/ui/panel.js";
 
-import {
-  areaM2FromLayer, // (still used by other inline features if any; safe to keep)
-  fmtArea,         // (still used by other inline features if any; safe to keep)
-} from "./js/map/geometry.js";
 import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
 import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
 
@@ -27,12 +23,19 @@ import {
   toggleDraw as featureToggleDraw,
 } from "./js/features/draw.js";
 
-/* SnowBridge — app.js (structure-optimized, behavior preserved)
-   - Orchestrator/wiring layer:
-       - DOM lookup + event binding
-       - State object + dependency injection
-       - Leaflet map + layers + feature actions
-   - GitHub Pages safe: native ES module; no build step.
+import {
+  viewSnowbridge as recordsViewSnowbridge,
+  saveSnowbridge as recordsSaveSnowbridge,
+  deleteSnowbridge as recordsDeleteSnowbridge,
+  openRequestForm as recordsOpenRequestForm,
+} from "./js/features/records.js";
+
+/* SnowBridge — app.js
+   Orchestrator/wiring layer:
+   - DOM lookup + event binding
+   - State object + dependency injection
+   - Leaflet map + layers + feature actions
+   GitHub Pages safe: native ES module; no build step.
 */
 
 (() => {
@@ -49,7 +52,7 @@ import {
     addrBtn: $("addrBtn"),
     topbar: $("topbar"),
 
-    // present in index.html (legacy toggles); app doesn’t rely on them
+    // present in index.html (legacy toggles)
     modeToggle: $("modeToggle"),
     satToggle: $("satToggle"),
     status: $("status"),
@@ -69,7 +72,7 @@ import {
   // -----------------------------
   const state = createState();
 
-  // Single-line status wrapper (optional max chars from config; preserves behavior when unset)
+  // Single-line status wrapper (cap from cfg.ui.statusLineMaxChars when available)
   const setStatus1 = (msg) => setStatus(msg, { maxChars: state.cfg?.ui?.statusLineMaxChars });
 
   // -----------------------------
@@ -86,7 +89,7 @@ import {
   };
 
   function severityStyleForRoll(roll) {
-    const rec = getRecord(roll);
+    const rec = getRecord(String(roll));
     const sev = rec?.request?.severity;
     if (sev === "red") return { fillColor: "#ef4444", fillOpacity: 0.28 };
     if (sev === "yellow") return { fillColor: "#f59e0b", fillOpacity: 0.22 };
@@ -95,15 +98,16 @@ import {
   }
 
   function applyParcelStyle(roll) {
-    const layer = state.parcelByRoll.get(roll);
+    const r = String(roll);
+    const layer = state.parcelByRoll.get(r);
     if (!layer) return;
 
-    const sev = severityStyleForRoll(roll);
+    const sev = severityStyleForRoll(r);
     const base = { ...STYLE.idleParcel };
     if (sev.fillColor) base.fillColor = sev.fillColor;
     if (sev.fillOpacity != null) base.fillOpacity = sev.fillOpacity;
 
-    if (state.selectedRoll === roll && state.isQueryStage) {
+    if (state.selectedRoll === r && state.isQueryStage) {
       layer.setStyle(state.blinkOn ? { ...base, ...STYLE.activeParcelA } : { ...base, ...STYLE.activeParcelB });
     } else {
       layer.setStyle(base);
@@ -115,17 +119,65 @@ import {
   }
 
   // -----------------------------
-  // Feature adapters (new structure)
+  // Feature adapters (stable call sites)
   // -----------------------------
-  // Keep app.js call sites stable (toggleSatellite(true/false), toggleSize(true/false), toggleDraw(true/false), etc.)
-  const toggleSatellite = (force) =>
+  const toggleSatellite = (force) => {
     featureToggleSatellite(state, force, { L, setStatus1, snowOutlineStyle: STYLE.snowOutline });
+
+    // keep optional topbar checkbox in sync (no hard dependency)
+    try {
+      if (el.satToggle) el.satToggle.checked = !!state.satOn;
+    } catch {}
+  };
 
   const toggleSize = (force) =>
     featureToggleSize(state, force, { L, setStatus1, sizeOutlineStyle: STYLE.sizeOutline });
 
   const toggleDraw = (force) =>
     featureToggleDraw(state, force, { setStatus1, toggleSatellite: (f) => toggleSatellite(f) });
+
+  // -----------------------------
+  // Records feature adapters (NEW)
+  // -----------------------------
+  async function viewSnowbridge() {
+    return recordsViewSnowbridge(state, {
+      getRecord: (roll) => getRecord(String(roll)),
+      setStatus1,
+      toggleSatellite: (force) => toggleSatellite(force),
+      resizeCanvasToMap: (st) => featureResizeCanvasToMap(st),
+      loadDataUrlToCanvas: (st, dataUrl) => featureLoadDataUrlToCanvas(st, dataUrl),
+    });
+  }
+
+  function saveSnowbridge() {
+    return recordsSaveSnowbridge(state, {
+      getRecord: (roll) => getRecord(String(roll)),
+      setRecord: (roll, rec) => setRecord(String(roll), rec),
+      setStatus1,
+      restyleAllParcels,
+      canvasToDataUrl: (st) => featureCanvasToDataUrl(st),
+      toggleDraw: (force) => toggleDraw(force),
+    });
+  }
+
+  function deleteSnowbridge() {
+    return recordsDeleteSnowbridge(state, {
+      getRecord: (roll) => getRecord(String(roll)),
+      deleteRecord: (roll) => deleteRecord(String(roll)),
+      setStatus1,
+      restyleAllParcels,
+      clearCanvas: (st) => featureClearCanvas(st),
+    });
+  }
+
+  function openRequestForm() {
+    return recordsOpenRequestForm(state, {
+      getRecord: (roll) => getRecord(String(roll)),
+      setRecord: (roll, rec) => setRecord(String(roll), rec),
+      setStatus1,
+      restyleAllParcels,
+    });
+  }
 
   // -----------------------------
   // Panel wiring (ui/panel.js)
@@ -178,93 +230,6 @@ import {
     const best = getSuggestions(q, state.addresses, 1)[0] || null;
     if (!best) return setStatus1("No match");
     enterQueryStage(state, best.roll, { center: [best.lat, best.lng], source: "address" }, queryDeps.enter);
-  }
-
-  // -----------------------------
-  // Save / View / Delete snowbridge — preserved
-  // -----------------------------
-  async function viewSnowbridge() {
-    const roll = state.selectedRoll;
-    if (!roll) return setStatus1("Select a parcel first");
-
-    const rec = getRecord(roll);
-    if (!rec?.drawingDataUrl) return setStatus1("No saved snowbridge for this parcel");
-
-    if (!state.satOn) toggleSatellite(true);
-    if (!state.satOn) return;
-
-    state.canvas.style.display = "block";
-    featureResizeCanvasToMap(state);
-    await featureLoadDataUrlToCanvas(state, rec.drawingDataUrl);
-    setStatus1(`Loaded snowbridge • roll ${roll}`);
-  }
-
-  function saveSnowbridge() {
-    const roll = state.selectedRoll;
-    if (!roll) return setStatus1("Select a parcel first");
-
-    if (!state.hasUnsavedDrawing && !getRecord(roll)?.drawingDataUrl) {
-      return setStatus1("Error • no drawing to save");
-    }
-
-    const dataUrl = featureCanvasToDataUrl(state);
-    if (!dataUrl || dataUrl.length < 200) return setStatus1("Error • drawing capture failed");
-
-    const existing = getRecord(roll);
-    if (!existing?.request) return setStatus1("Error • add Request before saving");
-
-    setRecord(roll, { ...existing, drawingDataUrl: dataUrl, updatedAt: Date.now() });
-    state.hasUnsavedDrawing = false;
-    restyleAllParcels();
-    setStatus1(`Saved snowbridge • roll ${roll}`);
-
-    if (state.drawEnabled) toggleDraw(false);
-  }
-
-  function deleteSnowbridge() {
-    const roll = state.selectedRoll;
-    if (!roll) return setStatus1("Select a parcel first");
-
-    const rec = getRecord(roll);
-    if (!rec) return setStatus1("Error • nothing stored for this parcel");
-
-    const ok = window.confirm(`Delete stored snowbridge + request for ${roll}?`);
-    if (!ok) return;
-
-    deleteRecord(roll);
-    featureClearCanvas(state);
-    state.hasUnsavedDrawing = false;
-    restyleAllParcels();
-    setStatus1(`Deleted snowbridge • roll ${roll}`);
-  }
-
-  // -----------------------------
-  // Request form (modal-ish prompt) — preserved
-  // -----------------------------
-  function openRequestForm() {
-    const roll = state.selectedRoll;
-    if (!roll) return setStatus1("Select a parcel first");
-
-    const hasDrawing = state.hasUnsavedDrawing || !!getRecord(roll)?.drawingDataUrl;
-    if (!hasDrawing) return setStatus1("Error • draw snowbridge before Request");
-
-    const severity = (prompt("Severity (green / yellow / red):", "yellow") || "").toLowerCase().trim();
-    const sev = severity === "green" || severity === "yellow" || severity === "red" ? severity : null;
-    if (!sev) return setStatus1("Error • invalid severity");
-
-    const seniors = (prompt("Seniors/at-risk on site? (yes/no):", "no") || "").toLowerCase().startsWith("y");
-    const estSnow = (prompt("Estimated snow (e.g. 10cm, 20cm):", "10cm") || "").trim();
-    const notes = (prompt("Notes (optional):", "") || "").trim();
-
-    const existing = getRecord(roll) || {};
-    setRecord(roll, {
-      ...existing,
-      request: { severity: sev, seniors, estSnow, notes },
-      updatedAt: Date.now(),
-    });
-
-    restyleAllParcels();
-    setStatus1(`Request saved • ${sev.toUpperCase()} • roll ${roll}`);
   }
 
   // -----------------------------
@@ -321,7 +286,7 @@ import {
     satOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
     state.satellite = L.tileLayer(satUrl, satOpt);
 
-    // NEW: install sticky zoom behavior (preserved behavior, now in features/satellite.js)
+    // Install sticky zoom behavior for satellite (safe even before snow data loads)
     installSatelliteStickyZoom(state, { L, snowOutlineStyle: STYLE.snowOutline });
 
     // UI
@@ -353,7 +318,7 @@ import {
       const suggest = createSuggestHandlers(el.addrInput, /** @type {HTMLDivElement} */ (state.suggestBox), {
         getMatches: (q) => getSuggestions(q || "", state.addresses, 12),
         onPick: () => {
-          // preserved: app.js previously only filled input + hid; no extra side effects
+          // preserved: app.js only filled input + hid; no extra side effects
         },
         onGo,
         getIndex: () => state.suggestIndex,
@@ -371,6 +336,21 @@ import {
       window.addEventListener("resize", reposition);
       window.addEventListener("scroll", reposition, true);
     }
+
+    // Optional: wire topbar satellite checkbox to feature (fail-soft)
+    try {
+      if (el.satToggle) {
+        el.satToggle.addEventListener("change", () => toggleSatellite(!!el.satToggle.checked));
+        // reflect initial state
+        el.satToggle.checked = !!state.satOn;
+      }
+    } catch {}
+
+    // Optional: modeToggle exists but behavior is intentionally not changed here.
+    // (Avoid regressions; no extracted module defined its semantics.)
+    try {
+      if (el.modeToggle) el.modeToggle.disabled = !(state.cfg?.ui?.allowSnowZoneMode ?? true);
+    } catch {}
 
     // Load data
     try {
