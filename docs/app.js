@@ -6,6 +6,7 @@ import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
 import { setStatus, hardFail } from "./js/ui/status.js";
 import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./js/ui/suggest.js";
 import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/contextMenu.js";
+import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPanelOpen } from "./js/ui/panel.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -162,178 +163,27 @@ import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/c
   }
 
   // -----------------------------
-  // UI: Panel (draggable + resizable)
+  // Panel wiring (ui/panel.js)
   // -----------------------------
-  function ensurePanel() {
-    let p = $("sbPanel");
-    if (p) return p;
-
-    p = document.createElement("div");
-    p.id = "sbPanel";
-    p.style.position = "absolute";
-    p.style.zIndex = "10001";
-    p.style.display = "none";
-    p.style.left = "14px";
-    p.style.top = "74px";
-    p.style.width = "320px";
-    p.style.height = "340px";
-    p.style.background = "#ffffff";
-    p.style.border = "1px solid #d1d5db";
-    p.style.borderRadius = "12px";
-    p.style.boxShadow = "0 14px 34px rgba(0,0,0,0.16)";
-    p.style.overflow = "auto";
-    p.style.resize = "both";
-    p.style.minWidth = "260px";
-    p.style.minHeight = "220px";
-
-    const header = document.createElement("div");
-    header.id = "sbPanelHeader";
-    header.style.cursor = "move";
-    header.style.padding = "10px 12px";
-    header.style.borderBottom = "1px solid #e5e7eb";
-    header.style.fontWeight = "600";
-    header.textContent = "SnowBridge";
-
-    const body = document.createElement("div");
-    body.id = "sbPanelBody";
-    body.style.padding = "10px 12px";
-
-    p.appendChild(header);
-    p.appendChild(body);
-    document.body.appendChild(p);
-
-    // restore last panel position/size
-    const ui = loadUI();
-    if (ui.panelLeft) p.style.left = ui.panelLeft;
-    if (ui.panelTop) p.style.top = ui.panelTop;
-    if (ui.panelWidth) p.style.width = ui.panelWidth;
-    if (ui.panelHeight) p.style.height = ui.panelHeight;
-
-    // drag logic
-    let dragging = false;
-    let startX = 0,
-      startY = 0,
-      startL = 0,
-      startT = 0;
-
-    header.addEventListener("mousedown", (e) => {
-      dragging = true;
-      startX = e.clientX;
-      startY = e.clientY;
-      const rect = p.getBoundingClientRect();
-      startL = rect.left;
-      startT = rect.top;
-      e.preventDefault();
-    });
-
-    window.addEventListener("mousemove", (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      p.style.left = `${Math.round(startL + dx)}px`;
-      p.style.top = `${Math.round(startT + dy)}px`;
-    });
-
-    window.addEventListener("mouseup", () => {
-      dragging = false;
-      saveUI({
-        panelLeft: p.style.left,
-        panelTop: p.style.top,
-        panelWidth: p.style.width,
-        panelHeight: p.style.height,
-      });
-    });
-
-    try {
-      new ResizeObserver(() => {
-        saveUI({
-          panelLeft: p.style.left,
-          panelTop: p.style.top,
-          panelWidth: p.style.width,
-          panelHeight: p.style.height,
-        });
-      }).observe(p);
-    } catch {}
-
-    return p;
-  }
-
   function openPanel() {
-    const p = state.panel;
-    const body = $("sbPanelBody");
-    const roll = state.selectedRoll;
-    if (!roll) return;
-
-    $("sbPanelHeader").textContent = `SnowBridge • ${roll}`;
-    body.innerHTML = "";
-
-    const mkBtn = (label) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = label;
-      b.style.display = "block";
-      b.style.width = "100%";
-      b.style.padding = "10px 10px";
-      b.style.margin = "8px 0";
-      b.style.borderRadius = "10px";
-      b.style.border = "1px solid #d1d5db";
-      b.style.background = "#f9fafb";
-      b.style.cursor = "pointer";
-      b.addEventListener("mouseenter", () => (b.style.background = "#f3f4f6"));
-      b.addEventListener("mouseleave", () => (b.style.background = "#f9fafb"));
-      return b;
-    };
-
-    const mkNote = (text) => {
-      const d = document.createElement("div");
-      d.textContent = text;
-      d.style.fontSize = "13px";
-      d.style.color = "#4b5563";
-      d.style.marginTop = "6px";
-      return d;
-    };
-
-    const bSize = mkBtn("View size (toggle)");
-    bSize.onclick = () => toggleSize();
-    body.appendChild(bSize);
-
-    const bSat = mkBtn("View satellite (toggle)");
-    bSat.onclick = () => toggleSatellite();
-    body.appendChild(bSat);
-
-    const bDraw = mkBtn("Draw snowbridge (toggle)");
-    bDraw.onclick = () => toggleDraw();
-    body.appendChild(bDraw);
-
-    const bSave = mkBtn("Save snowbridge");
-    bSave.onclick = () => saveSnowbridge();
-    body.appendChild(bSave);
-
-    const bView = mkBtn("View snowbridge");
-    bView.onclick = () => viewSnowbridge();
-    body.appendChild(bView);
-
-    const bReq = mkBtn("Request");
-    bReq.onclick = () => openRequestForm();
-    body.appendChild(bReq);
-
-    const bDel = mkBtn("Delete snowbridge");
-    bDel.onclick = () => deleteSnowbridge();
-    body.appendChild(bDel);
-
-    const bExit = mkBtn("Exit");
-    bExit.onclick = () => closePanel();
-    body.appendChild(bExit);
-
-    body.appendChild(mkNote("Tip: Right-click parcel → View. Left-click active parcel again → open this panel."));
-
-    p.style.display = "block";
+    uiOpenPanel(state, panelActions);
   }
 
   function closePanel() {
-    state.panel.style.display = "none";
+    uiClosePanel();
     exitQueryStage();
   }
+
+  const panelActions = {
+    toggleSize: () => toggleSize(),
+    toggleSatellite: () => toggleSatellite(),
+    toggleDraw: () => toggleDraw(),
+    saveSnowbridge: () => saveSnowbridge(),
+    viewSnowbridge: () => viewSnowbridge(),
+    openRequestForm: () => openRequestForm(),
+    deleteSnowbridge: () => deleteSnowbridge(),
+    closePanel: () => closePanel(),
+  };
 
   // -----------------------------
   // Drawing overlay (spray paint)
@@ -638,7 +488,7 @@ import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/c
     startBlink();
     setStatus1(`Query • roll ${state.selectedRoll}${source ? ` • ${source}` : ""}`);
 
-    if (state.panel.style.display !== "none") openPanel();
+    if (isPanelOpen()) openPanel();
   }
 
   function exitQueryStage() {
@@ -924,7 +774,7 @@ import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/c
     // UI
     state.suggestBox = ensureSuggestBox();
     state.ctxMenu = ensureContextMenu();
-    state.panel = ensurePanel();
+    state.panel = ensurePanel({ loadUI, saveUI });
     state.canvas = ensureDrawCanvas();
 
     // Canvas sizing
