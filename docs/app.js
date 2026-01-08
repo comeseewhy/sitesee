@@ -1,9 +1,11 @@
+// docs/app.js
 import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } from "./js/core/storage.js";
 import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
 import { createState } from "./js/core/state.js";
 import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
 import { setStatus, hardFail } from "./js/ui/status.js";
 import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./js/ui/suggest.js";
+import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/contextMenu.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -11,7 +13,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
    - Second left-click on active parcel opens draggable/resizable panel:
        View Size (area), View Satellite (masked to +8m), Draw (spray), Save/View/Delete Snowbridge, Request
    - Severity coloring persists (localStorage) and appears on overview
-   - Removes reliance on Satellite toggle + Snow zone toggle (those should be removed from index.html)
+   - GitHub Pages safe: native ES module; no build step.
 */
 
 (() => {
@@ -26,8 +28,12 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     map: $("map"),
     addrInput: $("addrInput"),
     addrBtn: $("addrBtn"),
-    // status is now handled by ui/status.js (defaults to #status)
     topbar: $("topbar"),
+
+    // present in index.html (legacy toggles); app doesn’t rely on them
+    modeToggle: $("modeToggle"),
+    satToggle: $("satToggle"),
+    status: $("status"),
   };
 
   if (typeof L === "undefined") {
@@ -43,6 +49,9 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
   // State
   // -----------------------------
   const state = createState();
+
+  // Single-line status wrapper (optional max chars from config; preserves behavior when unset)
+  const setStatus1 = (msg) => setStatus(msg, { maxChars: state.cfg?.ui?.statusLineMaxChars });
 
   // -----------------------------
   // Geometry helpers (still in app.js for now)
@@ -150,59 +159,6 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     try {
       if (lock) m.stop();
     } catch {}
-  }
-
-  // -----------------------------
-  // UI: Context menu (right click)
-  // -----------------------------
-  function ensureContextMenu() {
-    let cm = $("sbCtx");
-    if (cm) return cm;
-
-    cm = document.createElement("div");
-    cm.id = "sbCtx";
-    cm.style.position = "absolute";
-    cm.style.display = "none";
-    cm.style.zIndex = "10000";
-    cm.style.background = "#fff";
-    cm.style.border = "1px solid #d1d5db";
-    cm.style.borderRadius = "8px";
-    cm.style.boxShadow = "0 10px 22px rgba(0,0,0,0.14)";
-    cm.style.fontFamily = "system-ui, Arial, sans-serif";
-    cm.style.fontSize = "14px";
-    cm.style.minWidth = "140px";
-    cm.style.overflow = "hidden";
-
-    document.body.appendChild(cm);
-    return cm;
-  }
-
-  function hideContextMenu() {
-    if (!state.ctxMenu) return;
-    state.ctxMenu.style.display = "none";
-    state.ctxMenu.innerHTML = "";
-  }
-
-  function showContextMenuAt(pxX, pxY, items) {
-    const cm = state.ctxMenu;
-    cm.innerHTML = "";
-    for (const it of items) {
-      const row = document.createElement("div");
-      row.textContent = it.label;
-      row.style.padding = "10px 12px";
-      row.style.cursor = "pointer";
-      row.addEventListener("mouseenter", () => (row.style.background = "#f3f4f6"));
-      row.addEventListener("mouseleave", () => (row.style.background = "transparent"));
-      row.addEventListener("click", () => {
-        hideContextMenu();
-        it.onClick();
-      });
-      cm.appendChild(row);
-    }
-
-    cm.style.left = `${Math.round(pxX)}px`;
-    cm.style.top = `${Math.round(pxY)}px`;
-    cm.style.display = "block";
   }
 
   // -----------------------------
@@ -457,7 +413,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     state.canvas.style.pointerEvents = "auto";
     state.canvas.style.cursor = "crosshair";
 
-    setStatus(`Draw ON • roll ${state.selectedRoll}`);
+    setStatus1(`Draw ON • roll ${state.selectedRoll}`);
 
     let drawing = false;
 
@@ -519,7 +475,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
 
     state.canvas.style.pointerEvents = "none";
     state.canvas.style.cursor = "default";
-    setStatus(`Draw OFF • roll ${state.selectedRoll}`);
+    setStatus1(`Draw OFF • roll ${state.selectedRoll}`);
 
     const h = state._drawHandlers;
     if (h) {
@@ -571,12 +527,12 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
   }
 
   // -----------------------------
-  // Address handling (now uses data/addressIndex.js)
+  // Address handling (data/addressIndex.js)
   // -----------------------------
   function onGo() {
     const q = el.addrInput?.value ?? "";
     const best = getSuggestions(q, state.addresses, 1)[0] || null;
-    if (!best) return setStatus("No match");
+    if (!best) return setStatus1("No match");
     enterQueryStage(best.roll, { center: [best.lat, best.lng], source: "address" });
   }
 
@@ -609,7 +565,13 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
           const r = String(roll);
           const px = e.originalEvent?.clientX ?? 0;
           const py = e.originalEvent?.clientY ?? 0;
-          showContextMenuAt(px, py, [{ label: "View", onClick: () => enterQueryStage(r, { source: "right-click" }) }]);
+
+          showContextMenuAt(
+            px,
+            py,
+            [{ label: "View", onClick: () => enterQueryStage(r, { source: "right-click" }) }],
+            { menu: state.ctxMenu }
+          );
         });
       },
     });
@@ -659,7 +621,8 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
   }
 
   function enterQueryStage(roll, { center = null, source = "" } = {}) {
-    hideContextMenu();
+    hideContextMenu(state.ctxMenu);
+
     const old = state.selectedRoll;
 
     state.selectedRoll = String(roll);
@@ -673,7 +636,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     zoomTight();
 
     startBlink();
-    setStatus(`Query • roll ${state.selectedRoll}${source ? ` • ${source}` : ""}`);
+    setStatus1(`Query • roll ${state.selectedRoll}${source ? ` • ${source}` : ""}`);
 
     if (state.panel.style.display !== "none") openPanel();
   }
@@ -689,7 +652,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     state.selectedRoll = null;
 
     if (roll) applyParcelStyle(roll);
-    setStatus("Ready • search or click a parcel");
+    setStatus1("Ready • search or click a parcel");
   }
 
   // -----------------------------
@@ -717,15 +680,15 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     clearSizeOverlays();
 
     if (!next) {
-      setStatus(`Size OFF • roll ${state.selectedRoll}`);
+      setStatus1(`Size OFF • roll ${state.selectedRoll}`);
       return;
     }
 
     const roll = state.selectedRoll;
-    if (!roll) return setStatus("Select a parcel first");
+    if (!roll) return setStatus1("Select a parcel first");
 
     const parcel = state.parcelByRoll.get(roll);
-    if (!parcel) return setStatus("Parcel not found");
+    if (!parcel) return setStatus1("Parcel not found");
 
     const areaM2 = areaM2FromLayer(parcel);
     const txt = `Size • ${fmtArea(areaM2)}`;
@@ -736,7 +699,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     state.sizeLabelMarker = L.marker(c, { interactive: false, opacity: 0.95 }).addTo(state.map);
     state.sizeLabelMarker.bindTooltip(txt, { permanent: true, direction: "top", offset: [0, -8] }).openTooltip();
 
-    setStatus(`${txt} • roll ${roll}`);
+    setStatus1(`${txt} • roll ${roll}`);
   }
 
   // -----------------------------
@@ -765,12 +728,12 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
 
     if (!next) {
       if (state.map.hasLayer(state.satellite)) state.map.removeLayer(state.satellite);
-      setStatus(`Satellite OFF • roll ${state.selectedRoll ?? ""}`.trim());
+      setStatus1(`Satellite OFF • roll ${state.selectedRoll ?? ""}`.trim());
       return;
     }
 
     const roll = state.selectedRoll;
-    if (!roll) return setStatus("Select a parcel first");
+    if (!roll) return setStatus1("Select a parcel first");
 
     const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
     if (state.map.getZoom() < minz) state.map.setZoom(minz, { animate: false });
@@ -778,7 +741,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     const snow = state.snowByRoll.get(roll);
     if (!snow) {
       state.satOn = false;
-      setStatus("Snow zone not found (+8m join mismatch?)");
+      setStatus1("Snow zone not found (+8m join mismatch?)");
       return;
     }
 
@@ -789,14 +752,14 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     const rings = polygonLatLngRingsFromGeoJSON(geom);
     if (!rings) {
       state.satOn = false;
-      setStatus("Unable to build mask from snow zone geometry");
+      setStatus1("Unable to build mask from snow zone geometry");
       return;
     }
 
     state.maskLayer = createOutsideMaskFromGeom(geom, rings).addTo(state.map);
     state.snowOutlineLayer = L.geoJSON(gj, { style: STYLE.snowOutline, interactive: false }).addTo(state.map);
 
-    setStatus(`Satellite ON • roll ${roll}`);
+    setStatus1(`Satellite ON • roll ${roll}`);
   }
 
   // -----------------------------
@@ -814,7 +777,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
 
     disableDrawMode();
     state.canvas.style.display = "none";
-    setStatus(`Draw OFF • roll ${state.selectedRoll}`);
+    setStatus1(`Draw OFF • roll ${state.selectedRoll}`);
   }
 
   // -----------------------------
@@ -822,10 +785,10 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
   // -----------------------------
   async function viewSnowbridge() {
     const roll = state.selectedRoll;
-    if (!roll) return setStatus("Select a parcel first");
+    if (!roll) return setStatus1("Select a parcel first");
 
     const rec = getRecord(roll);
-    if (!rec?.drawingDataUrl) return setStatus("No saved snowbridge for this parcel");
+    if (!rec?.drawingDataUrl) return setStatus1("No saved snowbridge for this parcel");
 
     if (!state.satOn) toggleSatellite(true);
     if (!state.satOn) return;
@@ -833,37 +796,37 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     state.canvas.style.display = "block";
     resizeCanvasToMap();
     await loadDataUrlToCanvas(rec.drawingDataUrl);
-    setStatus(`Loaded snowbridge • roll ${roll}`);
+    setStatus1(`Loaded snowbridge • roll ${roll}`);
   }
 
   function saveSnowbridge() {
     const roll = state.selectedRoll;
-    if (!roll) return setStatus("Select a parcel first");
+    if (!roll) return setStatus1("Select a parcel first");
 
     if (!state.hasUnsavedDrawing && !getRecord(roll)?.drawingDataUrl) {
-      return setStatus("Error • no drawing to save");
+      return setStatus1("Error • no drawing to save");
     }
 
     const dataUrl = canvasToDataUrl();
-    if (!dataUrl || dataUrl.length < 200) return setStatus("Error • drawing capture failed");
+    if (!dataUrl || dataUrl.length < 200) return setStatus1("Error • drawing capture failed");
 
     const existing = getRecord(roll);
-    if (!existing?.request) return setStatus("Error • add Request before saving");
+    if (!existing?.request) return setStatus1("Error • add Request before saving");
 
     setRecord(roll, { ...existing, drawingDataUrl: dataUrl, updatedAt: Date.now() });
     state.hasUnsavedDrawing = false;
     restyleAllParcels();
-    setStatus(`Saved snowbridge • roll ${roll}`);
+    setStatus1(`Saved snowbridge • roll ${roll}`);
 
     if (state.drawEnabled) toggleDraw(false);
   }
 
   function deleteSnowbridge() {
     const roll = state.selectedRoll;
-    if (!roll) return setStatus("Select a parcel first");
+    if (!roll) return setStatus1("Select a parcel first");
 
     const rec = getRecord(roll);
-    if (!rec) return setStatus("Error • nothing stored for this parcel");
+    if (!rec) return setStatus1("Error • nothing stored for this parcel");
 
     const ok = window.confirm(`Delete stored snowbridge + request for ${roll}?`);
     if (!ok) return;
@@ -872,7 +835,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     clearCanvas();
     state.hasUnsavedDrawing = false;
     restyleAllParcels();
-    setStatus(`Deleted snowbridge • roll ${roll}`);
+    setStatus1(`Deleted snowbridge • roll ${roll}`);
   }
 
   // -----------------------------
@@ -880,14 +843,14 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
   // -----------------------------
   function openRequestForm() {
     const roll = state.selectedRoll;
-    if (!roll) return setStatus("Select a parcel first");
+    if (!roll) return setStatus1("Select a parcel first");
 
     const hasDrawing = state.hasUnsavedDrawing || !!getRecord(roll)?.drawingDataUrl;
-    if (!hasDrawing) return setStatus("Error • draw snowbridge before Request");
+    if (!hasDrawing) return setStatus1("Error • draw snowbridge before Request");
 
     const severity = (prompt("Severity (green / yellow / red):", "yellow") || "").toLowerCase().trim();
     const sev = severity === "green" || severity === "yellow" || severity === "red" ? severity : null;
-    if (!sev) return setStatus("Error • invalid severity");
+    if (!sev) return setStatus1("Error • invalid severity");
 
     const seniors = (prompt("Seniors/at-risk on site? (yes/no):", "no") || "").toLowerCase().startsWith("y");
     const estSnow = (prompt("Estimated snow (e.g. 10cm, 20cm):", "10cm") || "").trim();
@@ -901,16 +864,16 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
     });
 
     restyleAllParcels();
-    setStatus(`Request saved • ${sev.toUpperCase()} • roll ${roll}`);
+    setStatus1(`Request saved • ${sev.toUpperCase()} • roll ${roll}`);
   }
 
   // -----------------------------
   // Init
   // -----------------------------
   async function init() {
-    setStatus("Loading…");
+    setStatus1("Loading…");
 
-    state.cfg = await loadConfigOrFallback({ onStatus: setStatus });
+    state.cfg = await loadConfigOrFallback({ onStatus: setStatus1 });
 
     const joinKey = state.cfg?.data?.joinKey || FALLBACK_CFG.data.joinKey;
     const files = state.cfg?.data?.files || FALLBACK_CFG.data.files;
@@ -973,7 +936,9 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
 
     // Hide ctx menu on click elsewhere
     document.addEventListener("click", (e) => {
-      if (state.ctxMenu.style.display !== "none" && !state.ctxMenu.contains(e.target)) hideContextMenu();
+      if (state.ctxMenu && state.ctxMenu.style.display !== "none" && !state.ctxMenu.contains(e.target)) {
+        hideContextMenu(state.ctxMenu);
+      }
     });
 
     // Address UI
@@ -1005,11 +970,11 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
 
     // Load data
     try {
-      setStatus("Loading parcels…");
+      setStatus1("Loading parcels…");
       const parcelsGeo = await loadJSON(files.parcels);
       state.parcelsLayer = buildParcelsLayer(parcelsGeo, joinKey).addTo(state.map);
 
-      setStatus("Loading +8m snow zone…");
+      setStatus1("Loading +8m snow zone…");
       const snowGeo = await loadJSON(files.snowZone);
       state.snowLayer = buildSnowLayer(snowGeo, joinKey).addTo(state.map);
 
@@ -1017,7 +982,7 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
         state.parcelsLayer.bringToFront();
       } catch {}
 
-      setStatus("Loading addresses…");
+      setStatus1("Loading addresses…");
       const addrGeo = await loadJSON(files.addresses);
 
       state.addresses = buildAddressIndex(addrGeo, joinKey, {
@@ -1034,14 +999,14 @@ import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./j
 
       restyleAllParcels();
 
-      setStatus(`Ready • ${state.addresses.length} addresses • search or click a parcel`);
+      setStatus1(`Ready • ${state.addresses.length} addresses • search or click a parcel`);
       console.log("Loaded:", {
         parcels: state.parcelByRoll.size,
         snowZone: state.snowByRoll.size,
         addresses: state.addresses.length,
       });
     } catch (e) {
-      hardFail(e.message, e);
+      hardFail(e.message, e, { maxChars: state.cfg?.ui?.statusLineMaxChars });
     }
   }
 
