@@ -14,13 +14,11 @@ import {
   fmtArea,
   lockMapInteractions,
 } from "./js/map/geometry.js";
+import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
 
-/* SnowBridge — app.js (new interaction model)
-   - Overview: address enter / left click / right click(View) enters "Query" stage
-   - Query stage: zoom + slow blinking active parcel
-   - Second left-click on active parcel opens draggable/resizable panel:
-       View Size (area), View Satellite (masked to +8m), Draw (spray), Save/View/Delete Snowbridge, Request
-   - Severity coloring persists (localStorage) and appears on overview
+/* SnowBridge — app.js (refactor-aligned, behavior preserved)
+   - Uses extracted modules for config/state/storage/ui/data/map helpers.
+   - Uses map/layers.js for parcels/snow layer construction (handler injection).
    - GitHub Pages safe: native ES module; no build step.
 */
 
@@ -236,7 +234,7 @@ import {
   }
 
   // -----------------------------
-  // Styling
+  // Styling (preserved)
   // -----------------------------
   const STYLE = {
     idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" },
@@ -244,6 +242,8 @@ import {
     activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" },
     sizeOutline: { weight: 3, opacity: 1, fillOpacity: 0.0, color: "#111827" },
     snowOutline: { weight: 2, opacity: 1, fillOpacity: 0.0, color: "#ffffff" },
+    // snow base layer style (matches prior buildSnowLayer defaults)
+    snowBase: { weight: 1, opacity: 0.35, fillOpacity: 0.0 },
   };
 
   function severityStyleForRoll(roll) {
@@ -286,61 +286,7 @@ import {
   }
 
   // -----------------------------
-  // Layers (IMPORTANT: snow layer non-interactive!)
-  // -----------------------------
-  function buildParcelsLayer(geojson, joinKey) {
-    state.parcelByRoll.clear();
-
-    return L.geoJSON(geojson, {
-      style: STYLE.idleParcel,
-      onEachFeature: (feature, layer) => {
-        const roll = feature?.properties?.[joinKey];
-        if (roll != null) state.parcelByRoll.set(String(roll), layer);
-
-        layer.on("click", () => {
-          if (roll == null) return;
-          const r = String(roll);
-
-          if (state.isQueryStage && state.selectedRoll === r) {
-            openPanel();
-            return;
-          }
-
-          enterQueryStage(r, { source: "left-click" });
-        });
-
-        layer.on("contextmenu", (e) => {
-          if (roll == null) return;
-          const r = String(roll);
-          const px = e.originalEvent?.clientX ?? 0;
-          const py = e.originalEvent?.clientY ?? 0;
-
-          showContextMenuAt(
-            px,
-            py,
-            [{ label: "View", onClick: () => enterQueryStage(r, { source: "right-click" }) }],
-            { menu: state.ctxMenu }
-          );
-        });
-      },
-    });
-  }
-
-  function buildSnowLayer(geojson, joinKey) {
-    state.snowByRoll.clear();
-
-    return L.geoJSON(geojson, {
-      interactive: false,
-      style: { weight: 1, opacity: 0.35, fillOpacity: 0.0 },
-      onEachFeature: (feature, layer) => {
-        const roll = feature?.properties?.[joinKey];
-        if (roll != null) state.snowByRoll.set(String(roll), layer);
-      },
-    });
-  }
-
-  // -----------------------------
-  // Query stage (slow blink + zoom)
+  // Query stage (slow blink + zoom) — preserved
   // -----------------------------
   function stopBlink() {
     if (state.blinkTimer) window.clearInterval(state.blinkTimer);
@@ -405,7 +351,7 @@ import {
   }
 
   // -----------------------------
-  // Size toggle
+  // Size toggle — preserved
   // -----------------------------
   function clearSizeOverlays() {
     if (state.sizeOutlineLayer) {
@@ -452,7 +398,7 @@ import {
   }
 
   // -----------------------------
-  // Satellite masked toggle (ONLY via panel)
+  // Satellite masked toggle (ONLY via panel) — preserved
   // -----------------------------
   function clearViewOverlays() {
     if (state.maskLayer) {
@@ -519,7 +465,7 @@ import {
   }
 
   // -----------------------------
-  // Draw toggle
+  // Draw toggle — preserved
   // -----------------------------
   function toggleDraw(force) {
     const next = typeof force === "boolean" ? force : !state.drawEnabled;
@@ -537,7 +483,7 @@ import {
   }
 
   // -----------------------------
-  // Save / View / Delete snowbridge
+  // Save / View / Delete snowbridge — preserved
   // -----------------------------
   async function viewSnowbridge() {
     const roll = state.selectedRoll;
@@ -595,7 +541,7 @@ import {
   }
 
   // -----------------------------
-  // Request form (modal-ish prompt)
+  // Request form (modal-ish prompt) — preserved
   // -----------------------------
   function openRequestForm() {
     const roll = state.selectedRoll;
@@ -621,6 +567,31 @@ import {
 
     restyleAllParcels();
     setStatus1(`Request saved • ${sev.toUpperCase()} • roll ${roll}`);
+  }
+
+  // -----------------------------
+  // Layer event handlers (injected into map/layers.js)
+  // -----------------------------
+  function onParcelClick({ roll }) {
+    if (!roll) return;
+
+    if (state.isQueryStage && state.selectedRoll === roll) {
+      openPanel();
+      return;
+    }
+
+    enterQueryStage(roll, { source: "left-click" });
+  }
+
+  function onParcelContextMenu({ roll, pxX, pxY }) {
+    if (!roll) return;
+
+    showContextMenuAt(
+      pxX,
+      pxY,
+      [{ label: "View", onClick: () => enterQueryStage(roll, { source: "right-click" }) }],
+      { menu: state.ctxMenu }
+    );
   }
 
   // -----------------------------
@@ -652,7 +623,7 @@ import {
     satOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
     state.satellite = L.tileLayer(satUrl, satOpt);
 
-    // Keep satellite + mask sticky once enabled
+    // Keep satellite + mask sticky once enabled (preserved)
     state.map.on("zoomend", () => {
       if (!state.satOn) return;
 
@@ -731,11 +702,25 @@ import {
     try {
       setStatus1("Loading parcels…");
       const parcelsGeo = await loadJSON(files.parcels);
-      state.parcelsLayer = buildParcelsLayer(parcelsGeo, joinKey).addTo(state.map);
+
+      // NOTE: uses extracted map/layers.js (handler injection)
+      state.parcelsLayer = buildParcelsLayer(parcelsGeo, joinKey, {
+        L,
+        state,
+        style: STYLE.idleParcel,
+        onClick: onParcelClick,
+        onContextMenu: onParcelContextMenu,
+      }).addTo(state.map);
 
       setStatus1("Loading +8m snow zone…");
       const snowGeo = await loadJSON(files.snowZone);
-      state.snowLayer = buildSnowLayer(snowGeo, joinKey).addTo(state.map);
+
+      // NOTE: snow layer is non-interactive by design
+      state.snowLayer = buildSnowLayer(snowGeo, joinKey, {
+        L,
+        state,
+        style: STYLE.snowBase,
+      }).addTo(state.map);
 
       try {
         state.parcelsLayer.bringToFront();
