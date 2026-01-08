@@ -10,14 +10,15 @@ import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/c
 import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPanelOpen } from "./js/ui/panel.js";
 
 import {
-  areaM2FromLayer,
-  fmtArea,
+  areaM2FromLayer, // (still used by other inline features if any; safe to keep)
+  fmtArea,          // (still used by other inline features if any; safe to keep)
   lockMapInteractions,
 } from "./js/map/geometry.js";
 import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
 import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
 
 import { installSatelliteStickyZoom, toggleSatellite as featureToggleSatellite } from "./js/features/satellite.js";
+import { toggleSize as featureToggleSize } from "./js/features/size.js";
 
 /* SnowBridge — app.js (structure-optimized, behavior preserved)
    - Orchestrator/wiring layer:
@@ -109,9 +110,12 @@ import { installSatelliteStickyZoom, toggleSatellite as featureToggleSatellite }
   // -----------------------------
   // Feature adapters (new structure)
   // -----------------------------
-  // Keep app.js call sites stable (toggleSatellite(true/false), etc.)
+  // Keep app.js call sites stable (toggleSatellite(true/false), toggleSize(true/false), etc.)
   const toggleSatellite = (force) =>
     featureToggleSatellite(state, force, { L, setStatus1, snowOutlineStyle: STYLE.snowOutline });
+
+  const toggleSize = (force) =>
+    featureToggleSize(state, force, { L, setStatus1, sizeOutlineStyle: STYLE.sizeOutline });
 
   // -----------------------------
   // Panel wiring (ui/panel.js)
@@ -315,53 +319,6 @@ import { installSatelliteStickyZoom, toggleSatellite as featureToggleSatellite }
     const best = getSuggestions(q, state.addresses, 1)[0] || null;
     if (!best) return setStatus1("No match");
     enterQueryStage(state, best.roll, { center: [best.lat, best.lng], source: "address" }, queryDeps.enter);
-  }
-
-  // -----------------------------
-  // Size toggle — preserved
-  // -----------------------------
-  function clearSizeOverlays() {
-    if (state.sizeOutlineLayer) {
-      try {
-        state.map.removeLayer(state.sizeOutlineLayer);
-      } catch {}
-      state.sizeOutlineLayer = null;
-    }
-    if (state.sizeLabelMarker) {
-      try {
-        state.map.removeLayer(state.sizeLabelMarker);
-      } catch {}
-      state.sizeLabelMarker = null;
-    }
-  }
-
-  function toggleSize(force) {
-    const next = typeof force === "boolean" ? force : !state.sizeOn;
-    state.sizeOn = next;
-
-    clearSizeOverlays();
-
-    if (!next) {
-      setStatus1(`Size OFF • roll ${state.selectedRoll}`);
-      return;
-    }
-
-    const roll = state.selectedRoll;
-    if (!roll) return setStatus1("Select a parcel first");
-
-    const parcel = state.parcelByRoll.get(roll);
-    if (!parcel) return setStatus1("Parcel not found");
-
-    const areaM2 = areaM2FromLayer(parcel, { L, map: state.map });
-    const txt = `Size • ${fmtArea(areaM2)}`;
-
-    state.sizeOutlineLayer = L.geoJSON(parcel.toGeoJSON(), { style: STYLE.sizeOutline, interactive: false }).addTo(state.map);
-
-    const c = parcel.getBounds().getCenter();
-    state.sizeLabelMarker = L.marker(c, { interactive: false, opacity: 0.95 }).addTo(state.map);
-    state.sizeLabelMarker.bindTooltip(txt, { permanent: true, direction: "top", offset: [0, -8] }).openTooltip();
-
-    setStatus1(`${txt} • roll ${roll}`);
   }
 
   // -----------------------------
