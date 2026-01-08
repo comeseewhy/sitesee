@@ -1,262 +1,534 @@
-/* SiteSee v1 — Leaflet + layer registry + geocode + shareable URL */
+/* SnowBridge — app.js (config-first, static-host friendly)
+   - Loads ./config.json
+   - Loads GeoJSON layers (parcels, snowZone (+8m), addresses, optional centroids)
+   - Address search -> zoom -> select by ROLLNUMSHO
+   - Parcel click -> select by ROLLNUMSHO
+   - Mode toggle: parcel vs snow zone highlighting
+   - Satellite toggle: independent layer, optionally gated by min zoom + selection
+*/
 
-const statusEl = document.getElementById("status");
-const searchInput = document.getElementById("searchInput");
-const basemapSelect = document.getElementById("basemapSelect");
-const yearSelect = document.getElementById("yearSelect");
-const productSelect = document.getElementById("productSelect");
+(() => {
+  "use strict";
 
-let layerRegistry = null;
-let activeDataLayer = null;
-let searchMarker = null;
+  // -----------------------------
+  // DOM helpers
+  // -----------------------------
+  const $ = (id) => document.getElementById(id);
 
-// ---- Map + basemaps ----
-const map = L.map("map").setView([42.85, -80.3], 10); // Norfolk-ish default
-
-const streets = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: "&copy; OpenStreetMap contributors"
-});
-
-const satellite = L.tileLayer(
-  "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-  { maxZoom: 19, attribution: "Tiles &copy; Esri" }
-);
-
-let activeBasemap = streets.addTo(map);
-
-basemapSelect.addEventListener("change", () => {
-  map.removeLayer(activeBasemap);
-  activeBasemap = basemapSelect.value === "satellite" ? satellite : streets;
-  activeBasemap.addTo(map);
-  updateUrlState();
-});
-
-// ---- Load layer registry ----
-async function loadRegistry() {
-  const res = await fetch("./layers.json", { cache: "no-store" });
-  if (!res.ok) throw new Error(`Failed to load layers.json: ${res.status}`);
-  layerRegistry = await res.json();
-}
-
-function setStatus(msg) {
-  statusEl.textContent = msg;
-}
-
-// ---- Geocode (Nominatim) ----
-async function geocode(query) {
-  // Add a small location bias for Ontario/Canada
-  const url = new URL("https://nominatim.openstreetmap.org/search");
-  url.searchParams.set("format", "json");
-  url.searchParams.set("q", query);
-  url.searchParams.set("limit", "1");
-  url.searchParams.set("countrycodes", "ca");
-  url.searchParams.set("addressdetails", "1");
-
-  // Nominatim prefers identifying User-Agent via headers, but browsers restrict this.
-  // For a public project later, consider switching to a provider designed for client-side use.
-  const res = await fetch(url.toString(), { headers: { "Accept": "application/json" } });
-  if (!res.ok) throw new Error(`Geocode failed: ${res.status}`);
-
-  const data = await res.json();
-  if (!data.length) return null;
-
-  const item = data[0];
-  return {
-    lat: parseFloat(item.lat),
-    lon: parseFloat(item.lon),
-    displayName: item.display_name,
-    bbox: item.boundingbox ? item.boundingbox.map(parseFloat) : null // [south, north, west, east]
+  const el = {
+    addrInput: $("addrInput"),
+    addrBtn: $("addrBtn"),
+    modeToggle: $("modeToggle"),
+    satToggle: $("satToggle"),
+    status: $("status"),
   };
-}
 
-async function handleSearch() {
-  const q = searchInput.value.trim();
-  if (!q) return;
+  function safeText(s) {
+    return String(s ?? "");
+  }
 
-  setStatus(`Searching: ${q}`);
-  try {
-    const result = await geocode(q);
-    if (!result) {
-      setStatus("No results found.");
+  function truncateOneLine(s, maxChars) {
+    const one = safeText(s).replace(/\s+/g, " ").trim();
+    if (!maxChars || one.length <= maxChars) return one;
+    return one.slice(0, Math.max(0, maxChars - 1)) + "…";
+  }
+
+  // status updates must stay on one line
+  function makeStatus(maxChars) {
+    return (msg) => {
+      if (!el.status) return;
+      el.status.textContent = truncateOneLine(msg, maxChars);
+    };
+  }
+
+  // -----------------------------
+  // Normalization + search
+  // -----------------------------
+  function normalizeAddress(s) {
+    return safeText(s)
+      .toUpperCase()
+      .replace(/[.,]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // Soft match: exact first, then contains
+  function findAddressMatch(addressRows, query) {
+    const q = normalizeAddress(query);
+    if (!q) return null;
+
+    let exact = null;
+    for (const r of addressRows) {
+      if (r.norm === q) {
+        exact = r;
+        break;
+      }
+    }
+    if (exact) return exact;
+
+    // contains match
+    for (const r of addressRows) {
+      if (r.norm.includes(q)) return r;
+    }
+    return null;
+  }
+
+  // -----------------------------
+  // GeoJSON loading
+  // -----------------------------
+  async function loadJSON(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`${url} → ${res.status} ${res.statusText}`);
+    return res.json();
+  }
+
+  function pickFirstField(properties, candidates) {
+    if (!properties) return null;
+    for (const k of candidates || []) {
+      if (properties[k] != null && String(properties[k]).trim() !== "") return k;
+    }
+    return null;
+  }
+
+  // -----------------------------
+  // App state
+  // -----------------------------
+  const state = {
+    cfg: null,
+    map: null,
+    basemap: null,
+    satellite: null,
+    // layers
+    layers: {
+      parcels: null,
+      snowZone: null,
+      addresses: null,
+      centroids: null,
+    },
+    // lookup maps
+    parcelByRoll: new Map(),
+    snowByRoll: new Map(),
+    centroidByRoll: new Map(),
+    // address search index
+    addressRows: [], // { label, norm, roll, lat, lng }
+    // selection
+    selected: {
+      roll: null,
+      source: null, // "address" | "parcel"
+      lastAction: "",
+    },
+    // transient markers
+    flashMarker: null,
+  };
+
+  // -----------------------------
+  // Selection + styling
+  // -----------------------------
+  function getHighlightMode() {
+    // checkbox = Snow zone ON
+    const allow = state.cfg?.ui?.allowSnowZoneMode !== false;
+    if (!allow) return "parcel";
+    return el.modeToggle && el.modeToggle.checked ? "snowZone" : "parcel";
+  }
+
+  function styleFor(mode, variant) {
+    const s = state.cfg?.style?.[mode]?.[variant] || {};
+    return {
+      weight: s.weight ?? 1,
+      opacity: s.opacity ?? 0.7,
+      fillOpacity: s.fillOpacity ?? 0.08,
+    };
+  }
+
+  function clearSelectionStyles() {
+    const prevRoll = state.selected.roll;
+    if (!prevRoll) return;
+
+    const parcelLayer = state.parcelByRoll.get(prevRoll);
+    const snowLayer = state.snowByRoll.get(prevRoll);
+
+    if (parcelLayer) parcelLayer.setStyle(styleFor("parcel", "default"));
+    if (snowLayer) snowLayer.setStyle(styleFor("snowZone", "default"));
+  }
+
+  function applySelectionStyles(roll) {
+    if (!roll) return;
+
+    // Always keep parcels visible; only "selected" highlight depends on mode.
+    const mode = getHighlightMode();
+
+    const parcelLayer = state.parcelByRoll.get(roll);
+    const snowLayer = state.snowByRoll.get(roll);
+
+    // Reset both to defaults first (in case user toggles mode)
+    if (parcelLayer) parcelLayer.setStyle(styleFor("parcel", "default"));
+    if (snowLayer) snowLayer.setStyle(styleFor("snowZone", "default"));
+
+    // Apply selected style to active mode layer
+    if (mode === "snowZone") {
+      if (snowLayer) {
+        snowLayer.setStyle(styleFor("snowZone", "selected"));
+        snowLayer.bringToFront();
+      }
+      // keep parcel subtle
+      if (parcelLayer) parcelLayer.bringToFront();
+    } else {
+      if (parcelLayer) {
+        parcelLayer.setStyle(styleFor("parcel", "selected"));
+        parcelLayer.bringToFront();
+      }
+      // keep snow zone subtle (still useful visual, but not emphasized)
+      if (snowLayer) snowLayer.bringToFront();
+    }
+  }
+
+  function fitToSelected(roll) {
+    const mode = getHighlightMode();
+    const padding = state.cfg?.map?.fitPaddingPx ?? 20;
+
+    const primary =
+      mode === "snowZone"
+        ? state.snowByRoll.get(roll) || state.parcelByRoll.get(roll)
+        : state.parcelByRoll.get(roll) || state.snowByRoll.get(roll);
+
+    if (!primary) return;
+
+    const b = primary.getBounds();
+    state.map.fitBounds(b, { padding: [padding, padding] });
+  }
+
+  function setSelectedParcel(roll, source) {
+    const STATUS = makeStatus(state.cfg?.ui?.statusLineMaxChars ?? 120);
+
+    // clear previous selection styling
+    clearSelectionStyles();
+
+    state.selected.roll = roll ? String(roll) : null;
+    state.selected.source = source || null;
+
+    if (!state.selected.roll) {
+      STATUS("Ready");
       return;
     }
 
-    // Marker + zoom
-    if (searchMarker) map.removeLayer(searchMarker);
-    searchMarker = L.marker([result.lat, result.lon]).addTo(map);
+    applySelectionStyles(state.selected.roll);
 
-    if (result.bbox && result.bbox.length === 4) {
-      const [south, north, west, east] = result.bbox;
-      map.fitBounds([[south, west], [north, east]]);
-    } else {
-      map.setView([result.lat, result.lon], 15);
+    // expose in console for future logging pipelines
+    console.log("SnowBridge selection:", {
+      roll: state.selected.roll,
+      source: state.selected.source,
+      mode: getHighlightMode(),
+    });
+
+    STATUS(`Selected: ${state.selected.roll}`);
+
+    // hone-in behavior (fit to bounds)
+    fitToSelected(state.selected.roll);
+
+    // satellite gating: if toggle is ON but zoom too low, nudge zoom after fit
+    maybeGateSatellite();
+  }
+
+  // -----------------------------
+  // Satellite gating (selection + zoom)
+  // -----------------------------
+  function isSatelliteEnabled() {
+    return !!(el.satToggle && el.satToggle.checked);
+  }
+
+  function addSatelliteIfAllowed() {
+    if (!state.satellite) return;
+
+    // Must have toggle on
+    if (!isSatelliteEnabled()) {
+      if (state.map.hasLayer(state.satellite)) state.map.removeLayer(state.satellite);
+      return;
     }
 
-    setStatus(`Found: ${result.displayName}`);
-    updateUrlState({ q, lat: result.lat, lon: result.lon });
+    // Optional rule: only show after selection
+    // If you want "only after selection", uncomment the next 3 lines:
+    // if (!state.selected.roll) {
+    //   if (state.map.hasLayer(state.satellite)) state.map.removeLayer(state.satellite);
+    //   return;
+    // }
 
-  } catch (err) {
-    console.error(err);
-    setStatus(`Search error: ${err.message}`);
-  }
-}
+    // Optional gating by zoom
+    const minZ = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
+    if (state.map.getZoom() < minZ) {
+      if (state.map.hasLayer(state.satellite)) state.map.removeLayer(state.satellite);
+      return;
+    }
 
-document.getElementById("searchBtn").addEventListener("click", handleSearch);
-searchInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") handleSearch();
-});
-
-// ---- Layer loading ----
-function pickLayer({ product, year }) {
-  if (!layerRegistry?.layers?.length) return null;
-
-  const tagsNeeded = [product];
-  if (year) tagsNeeded.push(year);
-
-  // match if all tags are present
-  const matches = layerRegistry.layers.filter(l =>
-    tagsNeeded.every(t => (l.tags || []).includes(t))
-  );
-
-  // fallback: product-only match
-  if (!matches.length) {
-    return layerRegistry.layers.find(l => (l.tags || []).includes(product)) || null;
+    if (!state.map.hasLayer(state.satellite)) state.satellite.addTo(state.map);
   }
 
-  return matches[0];
-}
+  function maybeGateSatellite() {
+    addSatelliteIfAllowed();
+  }
 
-async function loadGeoJsonLayer(layerDef) {
-  const res = await fetch(layerDef.url, { cache: "no-store" });
-  if (!res.ok) throw new Error(`Failed to load ${layerDef.id}: ${res.status}`);
-  const gj = await res.json();
+  // -----------------------------
+  // Address search behavior
+  // -----------------------------
+  function flashAt(lat, lng) {
+    if (!state.map) return;
 
-  // simple styling hooks
-  if (layerDef.style?.radius) {
-    return L.geoJSON(gj, {
-      pointToLayer: (_, latlng) => L.circleMarker(latlng, { radius: layerDef.style.radius })
+    if (state.flashMarker) {
+      try {
+        state.map.removeLayer(state.flashMarker);
+      } catch (_) {}
+      state.flashMarker = null;
+    }
+
+    state.flashMarker = L.circleMarker([lat, lng], { radius: 8, weight: 2 });
+    state.flashMarker.addTo(state.map);
+
+    setTimeout(() => {
+      if (state.flashMarker) {
+        try {
+          state.map.removeLayer(state.flashMarker);
+        } catch (_) {}
+        state.flashMarker = null;
+      }
+    }, 900);
+  }
+
+  function goToAddress() {
+    const STATUS = makeStatus(state.cfg?.ui?.statusLineMaxChars ?? 120);
+    const q = el.addrInput?.value ?? "";
+    const match = findAddressMatch(state.addressRows, q);
+
+    if (!match) {
+      STATUS("No match");
+      return;
+    }
+
+    // zoom near the address point (then fitBounds from selected polygon)
+    const currentZ = state.map.getZoom();
+    const targetZ = Math.max(currentZ, 17);
+    state.map.setView([match.lat, match.lng], targetZ);
+
+    flashAt(match.lat, match.lng);
+    setSelectedParcel(match.roll, "address");
+
+    console.log("Address match:", match);
+  }
+
+  // -----------------------------
+  // Layer builders
+  // -----------------------------
+  function buildParcelLayer(geojson, joinKey) {
+    // main parcels
+    return L.geoJSON(geojson, {
+      style: () => styleFor("parcel", "default"),
+      onEachFeature: (feature, layer) => {
+        const roll = feature?.properties?.[joinKey];
+        if (roll != null) state.parcelByRoll.set(String(roll), layer);
+
+        layer.on("click", () => {
+          if (roll == null) return;
+          setSelectedParcel(String(roll), "parcel");
+        });
+      },
     });
   }
 
-  return L.geoJSON(gj, { style: layerDef.style || {} });
-}
+  function buildSnowZoneLayer(geojson, joinKey) {
+    // +8m buffer polygons
+    return L.geoJSON(geojson, {
+      style: () => styleFor("snowZone", "default"),
+      onEachFeature: (feature, layer) => {
+        const roll = feature?.properties?.[joinKey];
+        if (roll != null) state.snowByRoll.set(String(roll), layer);
 
-async function applyLayerSelection() {
-  const product = productSelect.value; // e.g., "boundary" or "sample"
-  const year = yearSelect.value;       // e.g., "2020"
-
-  const layerDef = pickLayer({ product, year });
-
-  if (!layerDef) {
-    setStatus(`No layer found for product="${product}" year="${year || "any"}"`);
-    return;
+        // allow clicking snow zone too
+        layer.on("click", () => {
+          if (roll == null) return;
+          setSelectedParcel(String(roll), "parcel");
+        });
+      },
+    });
   }
 
-  setStatus(`Loading layer: ${layerDef.name}`);
-  try {
-    if (activeDataLayer) map.removeLayer(activeDataLayer);
+  function buildCentroidsLayer(geojson, joinKey) {
+    return L.geoJSON(geojson, {
+      pointToLayer: (feature, latlng) => L.circleMarker(latlng, { radius: 3, weight: 1 }),
+      onEachFeature: (feature, layer) => {
+        const roll = feature?.properties?.[joinKey];
+        if (roll != null) state.centroidByRoll.set(String(roll), layer);
+      },
+    });
+  }
 
-    if (layerDef.type === "geojson") {
-      activeDataLayer = await loadGeoJsonLayer(layerDef);
-      activeDataLayer.addTo(map);
+  function buildAddressIndex(addrGeojson, joinKey, labelPriority) {
+    const rows = [];
+    for (const f of addrGeojson.features || []) {
+      const p = f.properties || {};
+      const g = f.geometry;
 
-      // zoom to layer bounds if no search has happened
+      if (!g || g.type !== "Point" || !Array.isArray(g.coordinates)) continue;
+
+      const roll = p[joinKey];
+      if (roll == null) continue;
+
+      const labelField = pickFirstField(p, labelPriority);
+      const label = labelField ? String(p[labelField]).trim() : "";
+
+      const [lng, lat] = g.coordinates;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+      const finalLabel = label || `ROLL ${roll}`;
+      rows.push({
+        label: finalLabel,
+        norm: normalizeAddress(finalLabel),
+        roll: String(roll),
+        lat,
+        lng,
+      });
+    }
+    return rows;
+  }
+
+  // -----------------------------
+  // Init
+  // -----------------------------
+  async function init() {
+    const STATUS = makeStatus(120);
+    try {
+      STATUS("Loading config…");
+      state.cfg = await loadJSON("./config.json");
+
+      // rebind status with configured max chars
+      const STATUS2 = makeStatus(state.cfg?.ui?.statusLineMaxChars ?? 120);
+
+      // init map
+      const sv = state.cfg.map?.startView || { lat: 0, lng: 0, zoom: 2 };
+      state.map = L.map("map", { zoomControl: true }).setView(
+        [sv.lat, sv.lng],
+        sv.zoom
+      );
+
+      // zoom constraints
+      const minZoom = state.cfg.map?.minZoom ?? 0;
+      const maxZoom = state.cfg.map?.maxZoom ?? 19;
+      state.map.setMinZoom(minZoom);
+      state.map.setMaxZoom(maxZoom);
+
+      // basemap
+      const baseCfg = state.cfg.basemaps?.base;
+      if (!baseCfg?.url) throw new Error("Missing basemaps.base.url in config.json");
+
+      state.basemap = L.tileLayer(baseCfg.url, {
+        maxZoom: baseCfg.options?.maxZoom ?? maxZoom,
+        attribution: baseCfg.options?.attribution ?? "",
+      }).addTo(state.map);
+
+      // satellite (not added by default)
+      const satCfg = state.cfg.basemaps?.satellite;
+      if (satCfg?.url) {
+        state.satellite = L.tileLayer(satCfg.url, {
+          maxZoom: satCfg.options?.maxZoom ?? maxZoom,
+          attribution: satCfg.options?.attribution ?? "",
+        });
+      }
+
+      // data paths
+      const files = state.cfg.data?.files || {};
+      const joinKey = state.cfg.data?.joinKey || "ROLLNUMSHO";
+
+      // load parcels first (so clicks/select works immediately)
+      STATUS2("Loading parcels…");
+      const parcelsGeo = await loadJSON(files.parcels);
+      state.layers.parcels = buildParcelLayer(parcelsGeo, joinKey).addTo(state.map);
+
+      // load snow zone (+8m)
+      STATUS2("Loading snow zone…");
+      const snowGeo = await loadJSON(files.snowZone);
+      state.layers.snowZone = buildSnowZoneLayer(snowGeo, joinKey).addTo(state.map);
+
+      // keep parcel layer above snow zone by default (until selection)
       try {
-        const b = activeDataLayer.getBounds();
-        if (b.isValid()) map.fitBounds(b);
+        state.layers.parcels.bringToFront();
       } catch (_) {}
 
-      setStatus(`Loaded: ${layerDef.name}`);
-      updateUrlState();
-      return;
+      // load addresses (search index)
+      STATUS2("Loading addresses…");
+      const addrGeo = await loadJSON(files.addresses);
+      state.addressRows = buildAddressIndex(
+        addrGeo,
+        joinKey,
+        state.cfg.data?.addressLabelFieldsPriority || []
+      );
+
+      // optional centroids
+      if (state.cfg.ui?.showCentroids && files.centroids) {
+        STATUS2("Loading centroids…");
+        const centGeo = await loadJSON(files.centroids);
+        state.layers.centroids = buildCentroidsLayer(centGeo, joinKey).addTo(state.map);
+      }
+
+      // bind UI behaviors
+      bindUI();
+
+      STATUS2(`Ready • ${state.addressRows.length} addresses • click a parcel or search`);
+    } catch (err) {
+      console.error(err);
+      const STATUS3 = makeStatus(state.cfg?.ui?.statusLineMaxChars ?? 120);
+      STATUS3(`Load error: ${err.message}`);
+    }
+  }
+
+  function bindUI() {
+    const STATUS = makeStatus(state.cfg?.ui?.statusLineMaxChars ?? 120);
+
+    // address search
+    if (el.addrBtn) el.addrBtn.addEventListener("click", goToAddress);
+    if (el.addrInput) {
+      el.addrInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") goToAddress();
+      });
     }
 
-    setStatus(`Unsupported layer type: ${layerDef.type} (v1 supports geojson)`);
-  } catch (err) {
-    console.error(err);
-    setStatus(`Layer error: ${err.message}`);
-  }
-}
+    // mode toggle: re-apply styles for current selection
+    if (el.modeToggle) {
+      const allow = state.cfg?.ui?.allowSnowZoneMode !== false;
+      el.modeToggle.disabled = !allow;
 
-document.getElementById("applyLayerBtn").addEventListener("click", applyLayerSelection);
+      // set default mode from config
+      const defaultMode = state.cfg?.ui?.defaultHighlightMode || "parcel";
+      el.modeToggle.checked = allow && defaultMode === "snowZone";
 
-// ---- URL state (shareable links) ----
-function updateUrlState(partial = {}) {
-  const center = map.getCenter();
-  const z = map.getZoom();
+      el.modeToggle.addEventListener("change", () => {
+        if (!state.selected.roll) {
+          STATUS(el.modeToggle.checked ? "Snow zone mode" : "Parcel mode");
+          return;
+        }
+        // re-apply highlight to selected roll for new mode
+        applySelectionStyles(state.selected.roll);
+        fitToSelected(state.selected.roll);
+        STATUS(
+          `Selected: ${state.selected.roll} • ${
+            el.modeToggle.checked ? "Snow zone" : "Parcel"
+          }`
+        );
+      });
+    }
 
-  const params = new URLSearchParams(window.location.search);
+    // satellite toggle
+    if (el.satToggle) {
+      el.satToggle.addEventListener("change", () => {
+        maybeGateSatellite();
+        STATUS(el.satToggle.checked ? "Satellite ON" : "Satellite OFF");
+      });
+    }
 
-  // map state
-  params.set("z", String(z));
-  params.set("lat", String(partial.lat ?? center.lat));
-  params.set("lon", String(partial.lon ?? center.lng));
-
-  // search query (optional)
-  if (partial.q) params.set("q", partial.q);
-
-  // ui state
-  params.set("basemap", basemapSelect.value);
-  params.set("year", yearSelect.value || "");
-  params.set("product", productSelect.value || "");
-
-  const newUrl = `${window.location.pathname}?${params.toString()}`;
-  window.history.replaceState({}, "", newUrl);
-}
-
-function restoreFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-
-  const basemap = params.get("basemap");
-  const year = params.get("year");
-  const product = params.get("product");
-  const lat = parseFloat(params.get("lat"));
-  const lon = parseFloat(params.get("lon"));
-  const z = parseInt(params.get("z"), 10);
-  const q = params.get("q");
-
-  if (basemap) basemapSelect.value = basemap;
-  if (year !== null) yearSelect.value = year;
-  if (product) productSelect.value = product;
-
-  // set basemap
-  map.removeLayer(activeBasemap);
-  activeBasemap = basemapSelect.value === "satellite" ? satellite : streets;
-  activeBasemap.addTo(map);
-
-  // restore map position
-  if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(z)) {
-    map.setView([lat, lon], z);
+    // gate satellite on zoom changes
+    if (state.map) {
+      state.map.on("zoomend", () => {
+        maybeGateSatellite();
+      });
+    }
   }
 
-  if (q) searchInput.value = q;
-}
-
-// Copy link
-document.getElementById("copyLinkBtn").addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(window.location.href);
-    setStatus("Link copied.");
-  } catch {
-    setStatus("Couldn’t copy link (clipboard blocked).");
-  }
-});
-
-// ---- Boot ----
-(async function main() {
-  try {
-    restoreFromUrl();
-    await loadRegistry();
-    setStatus("Ready.");
-
-    // If URL encodes a product/year, auto-load it
-    const params = new URLSearchParams(window.location.search);
-    const product = params.get("product");
-    if (product) await applyLayerSelection();
-
-  } catch (err) {
-    console.error(err);
-    setStatus(`Startup error: ${err.message}`);
-  }
+  // Boot
+  init();
 })();
