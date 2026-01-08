@@ -11,14 +11,21 @@ import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPa
 
 import {
   areaM2FromLayer, // (still used by other inline features if any; safe to keep)
-  fmtArea,          // (still used by other inline features if any; safe to keep)
-  lockMapInteractions,
+  fmtArea,         // (still used by other inline features if any; safe to keep)
 } from "./js/map/geometry.js";
 import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
 import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
 
 import { installSatelliteStickyZoom, toggleSatellite as featureToggleSatellite } from "./js/features/satellite.js";
 import { toggleSize as featureToggleSize } from "./js/features/size.js";
+import {
+  ensureDrawCanvas as featureEnsureDrawCanvas,
+  resizeCanvasToMap as featureResizeCanvasToMap,
+  clearCanvas as featureClearCanvas,
+  canvasToDataUrl as featureCanvasToDataUrl,
+  loadDataUrlToCanvas as featureLoadDataUrlToCanvas,
+  toggleDraw as featureToggleDraw,
+} from "./js/features/draw.js";
 
 /* SnowBridge — app.js (structure-optimized, behavior preserved)
    - Orchestrator/wiring layer:
@@ -110,12 +117,15 @@ import { toggleSize as featureToggleSize } from "./js/features/size.js";
   // -----------------------------
   // Feature adapters (new structure)
   // -----------------------------
-  // Keep app.js call sites stable (toggleSatellite(true/false), toggleSize(true/false), etc.)
+  // Keep app.js call sites stable (toggleSatellite(true/false), toggleSize(true/false), toggleDraw(true/false), etc.)
   const toggleSatellite = (force) =>
     featureToggleSatellite(state, force, { L, setStatus1, snowOutlineStyle: STYLE.snowOutline });
 
   const toggleSize = (force) =>
     featureToggleSize(state, force, { L, setStatus1, sizeOutlineStyle: STYLE.sizeOutline });
+
+  const toggleDraw = (force) =>
+    featureToggleDraw(state, force, { setStatus1, toggleSatellite: (f) => toggleSatellite(f) });
 
   // -----------------------------
   // Panel wiring (ui/panel.js)
@@ -139,157 +149,6 @@ import { toggleSize as featureToggleSize } from "./js/features/size.js";
     deleteSnowbridge: () => deleteSnowbridge(),
     closePanel: () => closePanel(),
   };
-
-  // -----------------------------
-  // Draw overlay (spray paint) — preserved
-  // -----------------------------
-  function ensureDrawCanvas() {
-    let c = $("sbCanvas");
-    if (c) return c;
-
-    c = document.createElement("canvas");
-    c.id = "sbCanvas";
-    c.style.position = "absolute";
-    c.style.left = "0";
-    c.style.top = "0";
-    c.style.zIndex = "8000";
-    c.style.pointerEvents = "none";
-    c.style.display = "none";
-
-    el.map.appendChild(c);
-    return c;
-  }
-
-  function resizeCanvasToMap() {
-    const c = state.canvas;
-    if (!c || !state.map) return;
-    const size = state.map.getSize();
-    c.width = size.x;
-    c.height = size.y;
-  }
-
-  function clearCanvas() {
-    const c = state.canvas;
-    if (!c) return;
-    const ctx = c.getContext("2d");
-    ctx.clearRect(0, 0, c.width, c.height);
-  }
-
-  function canvasToDataUrl() {
-    const c = state.canvas;
-    if (!c) return null;
-    return c.toDataURL("image/png");
-  }
-
-  function loadDataUrlToCanvas(dataUrl) {
-    return new Promise((resolve) => {
-      const c = state.canvas;
-      if (!c) return resolve(false);
-      const ctx = c.getContext("2d");
-      const img = new Image();
-      img.onload = () => {
-        ctx.clearRect(0, 0, c.width, c.height);
-        ctx.drawImage(img, 0, 0);
-        resolve(true);
-      };
-      img.onerror = () => resolve(false);
-      img.src = dataUrl;
-    });
-  }
-
-  function enableDrawMode() {
-    state.drawEnabled = true;
-
-    if (!state.satOn) toggleSatellite(true);
-    if (!state.satOn) return;
-
-    lockMapInteractions(true, state.map);
-
-    const roll = state.selectedRoll;
-    const parcel = roll ? state.parcelByRoll.get(roll) : null;
-    if (parcel) {
-      const c = parcel.getBounds().getCenter();
-      state.map.setView(c, 22, { animate: false });
-    } else {
-      state.map.setZoom(22, { animate: false });
-    }
-
-    state.canvas.style.display = "block";
-    state.canvas.style.pointerEvents = "auto";
-    state.canvas.style.cursor = "crosshair";
-
-    setStatus1(`Draw ON • roll ${state.selectedRoll}`);
-
-    let drawing = false;
-
-    const brushR = 18;
-    const dotsPerSpray = 26;
-
-    const ctx = state.canvas.getContext("2d");
-    ctx.globalCompositeOperation = "source-over";
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
-
-    const spray = (x, y) => {
-      for (let i = 0; i < dotsPerSpray; i++) {
-        const a = Math.random() * Math.PI * 2;
-        const r = Math.random() * brushR;
-        const dx = Math.cos(a) * r;
-        const dy = Math.sin(a) * r;
-        ctx.beginPath();
-        ctx.arc(x + dx, y + dy, 1.4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    };
-
-    const toCanvasXY = (e) => {
-      const rect = state.canvas.getBoundingClientRect();
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    };
-
-    const onDown = (e) => {
-      if (!state.drawEnabled) return;
-      drawing = true;
-      e.preventDefault();
-      const { x, y } = toCanvasXY(e);
-      spray(x, y);
-      state.hasUnsavedDrawing = true;
-    };
-
-    const onMove = (e) => {
-      if (!state.drawEnabled || !drawing) return;
-      const { x, y } = toCanvasXY(e);
-      spray(x, y);
-      state.hasUnsavedDrawing = true;
-    };
-
-    const onUp = () => {
-      drawing = false;
-    };
-
-    state.canvas.addEventListener("mousedown", onDown);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-
-    state._drawHandlers = { onDown, onMove, onUp };
-  }
-
-  function disableDrawMode() {
-    state.drawEnabled = false;
-
-    lockMapInteractions(false, state.map);
-
-    state.canvas.style.pointerEvents = "none";
-    state.canvas.style.cursor = "default";
-    setStatus1(`Draw OFF • roll ${state.selectedRoll}`);
-
-    const h = state._drawHandlers;
-    if (h) {
-      state.canvas.removeEventListener("mousedown", h.onDown);
-      window.removeEventListener("mousemove", h.onMove);
-      window.removeEventListener("mouseup", h.onUp);
-    }
-    state._drawHandlers = null;
-  }
 
   // -----------------------------
   // Query stage wiring (map/queryStage.js)
@@ -322,24 +181,6 @@ import { toggleSize as featureToggleSize } from "./js/features/size.js";
   }
 
   // -----------------------------
-  // Draw toggle — preserved
-  // -----------------------------
-  function toggleDraw(force) {
-    const next = typeof force === "boolean" ? force : !state.drawEnabled;
-
-    if (next) {
-      if (!state.satOn) toggleSatellite(true);
-      if (!state.satOn) return;
-      enableDrawMode();
-      return;
-    }
-
-    disableDrawMode();
-    state.canvas.style.display = "none";
-    setStatus1(`Draw OFF • roll ${state.selectedRoll}`);
-  }
-
-  // -----------------------------
   // Save / View / Delete snowbridge — preserved
   // -----------------------------
   async function viewSnowbridge() {
@@ -353,8 +194,8 @@ import { toggleSize as featureToggleSize } from "./js/features/size.js";
     if (!state.satOn) return;
 
     state.canvas.style.display = "block";
-    resizeCanvasToMap();
-    await loadDataUrlToCanvas(rec.drawingDataUrl);
+    featureResizeCanvasToMap(state);
+    await featureLoadDataUrlToCanvas(state, rec.drawingDataUrl);
     setStatus1(`Loaded snowbridge • roll ${roll}`);
   }
 
@@ -366,7 +207,7 @@ import { toggleSize as featureToggleSize } from "./js/features/size.js";
       return setStatus1("Error • no drawing to save");
     }
 
-    const dataUrl = canvasToDataUrl();
+    const dataUrl = featureCanvasToDataUrl(state);
     if (!dataUrl || dataUrl.length < 200) return setStatus1("Error • drawing capture failed");
 
     const existing = getRecord(roll);
@@ -391,7 +232,7 @@ import { toggleSize as featureToggleSize } from "./js/features/size.js";
     if (!ok) return;
 
     deleteRecord(roll);
-    clearCanvas();
+    featureClearCanvas(state);
     state.hasUnsavedDrawing = false;
     restyleAllParcels();
     setStatus1(`Deleted snowbridge • roll ${roll}`);
@@ -487,14 +328,16 @@ import { toggleSize as featureToggleSize } from "./js/features/size.js";
     state.suggestBox = ensureSuggestBox();
     state.ctxMenu = ensureContextMenu();
     state.panel = ensurePanel({ loadUI, saveUI });
-    state.canvas = ensureDrawCanvas();
+
+    // Canvas (draw feature)
+    state.canvas = featureEnsureDrawCanvas(state, { mapEl: el.map });
 
     // Canvas sizing
-    state.map.on("resize", () => resizeCanvasToMap());
+    state.map.on("resize", () => featureResizeCanvasToMap(state));
     state.map.on("move", () => {
       /* keep canvas fixed to container */
     });
-    resizeCanvasToMap();
+    featureResizeCanvasToMap(state);
 
     // Hide ctx menu on click elsewhere
     document.addEventListener("click", (e) => {
