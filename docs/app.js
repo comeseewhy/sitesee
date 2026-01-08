@@ -1,4 +1,8 @@
-// docs/app.js (refactored orchestrator — integrates features/records.js)
+// docs/app.js (refactored orchestrator — integrates extracted modules)
+// GitHub Pages safe: native ES module; no build step.
+
+import { $ } from "./js/utils/dom.js";
+
 import { loadUI, saveUI, getRecord, setRecord, deleteRecord } from "./js/core/storage.js";
 import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
 import { createState } from "./js/core/state.js";
@@ -35,7 +39,6 @@ import {
    - DOM lookup + event binding
    - State object + dependency injection
    - Leaflet map + layers + feature actions
-   GitHub Pages safe: native ES module; no build step.
 */
 
 (() => {
@@ -44,8 +47,6 @@ import {
   // -----------------------------
   // DOM
   // -----------------------------
-  const $ = (id) => document.getElementById(id);
-
   const el = {
     map: $("map"),
     addrInput: $("addrInput"),
@@ -130,14 +131,13 @@ import {
     } catch {}
   };
 
-  const toggleSize = (force) =>
-    featureToggleSize(state, force, { L, setStatus1, sizeOutlineStyle: STYLE.sizeOutline });
+  const toggleSize = (force) => featureToggleSize(state, force, { L, setStatus1, sizeOutlineStyle: STYLE.sizeOutline });
 
   const toggleDraw = (force) =>
     featureToggleDraw(state, force, { setStatus1, toggleSatellite: (f) => toggleSatellite(f) });
 
   // -----------------------------
-  // Records feature adapters (NEW)
+  // Records feature adapters
   // -----------------------------
   async function viewSnowbridge() {
     return recordsViewSnowbridge(state, {
