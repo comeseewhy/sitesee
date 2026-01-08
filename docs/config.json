@@ -6,7 +6,7 @@
   },
   "map": {
     "startView": { "lat": 42.93, "lng": -80.28, "zoom": 14 },
-    "maxZoom": 19,
+    "maxZoom": 22,
     "minZoom": 11,
     "fitPaddingPx": 20,
     "satelliteEnableMinZoom": 16
