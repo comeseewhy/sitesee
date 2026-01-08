@@ -3,6 +3,7 @@ import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.j
 import { createState } from "./js/core/state.js";
 import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
 import { setStatus, hardFail } from "./js/ui/status.js";
+import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./js/ui/suggest.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -149,71 +150,6 @@ import { setStatus, hardFail } from "./js/ui/status.js";
     try {
       if (lock) m.stop();
     } catch {}
-  }
-
-  // -----------------------------
-  // UI: Suggest box
-  // -----------------------------
-  function ensureSuggestBox() {
-    let box = $("addrSuggest");
-    if (box) return box;
-
-    box = document.createElement("div");
-    box.id = "addrSuggest";
-    box.style.position = "absolute";
-    box.style.zIndex = "9999";
-    box.style.display = "none";
-    box.style.maxHeight = "260px";
-    box.style.overflow = "auto";
-    box.style.background = "#fff";
-    box.style.border = "1px solid #d1d5db";
-    box.style.borderRadius = "8px";
-    box.style.boxShadow = "0 6px 18px rgba(0,0,0,0.10)";
-    box.style.fontFamily = "system-ui, Arial, sans-serif";
-    box.style.fontSize = "14px";
-
-    document.body.appendChild(box);
-    return box;
-  }
-
-  function positionSuggestBox(box) {
-    if (!el.addrInput) return;
-    const r = el.addrInput.getBoundingClientRect();
-    box.style.left = `${Math.round(r.left)}px`;
-    box.style.top = `${Math.round(r.bottom + 6)}px`;
-    box.style.width = `${Math.round(r.width)}px`;
-  }
-
-  function setActiveRow(box, idx) {
-    const kids = Array.from(box.children);
-    kids.forEach((node, i) => (node.style.background = i === idx ? "#e5e7eb" : "transparent"));
-  }
-
-  function renderSuggestions(box, items, onPick) {
-    box.innerHTML = "";
-    if (!items.length) {
-      box.style.display = "none";
-      return;
-    }
-
-    for (const it of items) {
-      const row = document.createElement("div");
-      row.textContent = it.label;
-      row.style.padding = "10px 10px";
-      row.style.cursor = "pointer";
-      row.style.whiteSpace = "nowrap";
-      row.style.overflow = "hidden";
-      row.style.textOverflow = "ellipsis";
-
-      row.addEventListener("mouseenter", () => (row.style.background = "#f3f4f6"));
-      row.addEventListener("mouseleave", () => (row.style.background = "transparent"));
-      row.addEventListener("click", () => onPick(it));
-
-      box.appendChild(row);
-    }
-
-    positionSuggestBox(box);
-    box.style.display = "block";
   }
 
   // -----------------------------
@@ -1044,58 +980,28 @@ import { setStatus, hardFail } from "./js/ui/status.js";
     if (el.addrBtn) el.addrBtn.addEventListener("click", onGo);
 
     if (el.addrInput) {
-      el.addrInput.addEventListener("keydown", (e) => {
-        const box = state.suggestBox;
-        const open = box && box.style.display !== "none" && box.children.length;
-
-        if (open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-          e.preventDefault();
-          const n = box.children.length;
-          if (e.key === "ArrowDown") state.suggestIndex = (state.suggestIndex + 1) % n;
-          if (e.key === "ArrowUp") state.suggestIndex = (state.suggestIndex - 1 + n) % n;
-          setActiveRow(box, state.suggestIndex);
-          return;
-        }
-
-        if (open && e.key === "Enter" && state.suggestIndex >= 0) {
-          e.preventDefault();
-          const pickedLabel = box.children[state.suggestIndex]?.textContent;
-          if (pickedLabel) {
-            el.addrInput.value = pickedLabel;
-            box.style.display = "none";
-            onGo();
-          }
-          return;
-        }
-
-        if (e.key === "Enter") onGo();
+      // Create injected suggest wiring (preserves previous behavior)
+      const suggest = createSuggestHandlers(el.addrInput, /** @type {HTMLDivElement} */ (state.suggestBox), {
+        getMatches: (q) => getSuggestions(q || "", state.addresses, 12),
+        onPick: () => {
+          // app.js previously only filled input + hid; no extra side effects here
+        },
+        onGo,
+        getIndex: () => state.suggestIndex,
+        setIndex: (i) => {
+          state.suggestIndex = Number.isFinite(i) ? i : -1;
+        },
       });
 
-      el.addrInput.addEventListener("input", () => {
-        const q = el.addrInput.value || "";
-        const matches = getSuggestions(q, state.addresses, 12);
-        state.suggestIndex = -1;
-        renderSuggestions(state.suggestBox, matches, (picked) => {
-          el.addrInput.value = picked.label;
-          state.suggestIndex = -1;
-          state.suggestBox.style.display = "none";
-        });
-      });
+      el.addrInput.addEventListener("keydown", suggest.onKeyDown);
+      el.addrInput.addEventListener("input", suggest.onInput);
+      el.addrInput.addEventListener("focus", suggest.onFocus);
 
-      el.addrInput.addEventListener("focus", () => {
-        const q = el.addrInput.value || "";
-        const matches = getSuggestions(q, state.addresses, 12);
-        state.suggestIndex = -1;
-        renderSuggestions(state.suggestBox, matches, (picked) => {
-          el.addrInput.value = picked.label;
-          state.suggestIndex = -1;
-          state.suggestBox.style.display = "none";
-        });
-      });
+      // Keep dropdown aligned with the input on layout changes
+      const reposition = () => positionSuggestBox(el.addrInput, state.suggestBox);
+      window.addEventListener("resize", reposition);
+      window.addEventListener("scroll", reposition, true);
     }
-
-    window.addEventListener("resize", () => positionSuggestBox(state.suggestBox));
-    window.addEventListener("scroll", () => positionSuggestBox(state.suggestBox), true);
 
     // Load data
     try {
