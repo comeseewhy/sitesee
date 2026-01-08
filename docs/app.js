@@ -10,8 +10,6 @@ import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/c
 import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPanelOpen } from "./js/ui/panel.js";
 
 import {
-  polygonLatLngRingsFromGeoJSON,
-  createOutsideMaskFromGeom,
   areaM2FromLayer,
   fmtArea,
   lockMapInteractions,
@@ -19,8 +17,10 @@ import {
 import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
 import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
 
-/* SnowBridge — app.js (refactor-aligned, behavior preserved)
-   - app.js is the orchestrator/wiring layer:
+import { installSatelliteStickyZoom, toggleSatellite as featureToggleSatellite } from "./js/features/satellite.js";
+
+/* SnowBridge — app.js (structure-optimized, behavior preserved)
+   - Orchestrator/wiring layer:
        - DOM lookup + event binding
        - State object + dependency injection
        - Leaflet map + layers + feature actions
@@ -107,6 +107,13 @@ import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
   }
 
   // -----------------------------
+  // Feature adapters (new structure)
+  // -----------------------------
+  // Keep app.js call sites stable (toggleSatellite(true/false), etc.)
+  const toggleSatellite = (force) =>
+    featureToggleSatellite(state, force, { L, setStatus1, snowOutlineStyle: STYLE.snowOutline });
+
+  // -----------------------------
   // Panel wiring (ui/panel.js)
   // -----------------------------
   function openPanel() {
@@ -115,7 +122,6 @@ import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
 
   function closePanel() {
     uiClosePanel();
-    // exitQueryStage now lives in map/queryStage.js; call via injected deps
     exitQueryStage(state, queryDeps.exit);
   }
 
@@ -359,73 +365,6 @@ import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
   }
 
   // -----------------------------
-  // Satellite masked toggle (ONLY via panel) — preserved
-  // -----------------------------
-  function clearViewOverlays() {
-    if (state.maskLayer) {
-      try {
-        state.map.removeLayer(state.maskLayer);
-      } catch {}
-      state.maskLayer = null;
-    }
-    if (state.snowOutlineLayer) {
-      try {
-        state.map.removeLayer(state.snowOutlineLayer);
-      } catch {}
-      state.snowOutlineLayer = null;
-    }
-  }
-
-  function toggleSatellite(force) {
-    const next = typeof force === "boolean" ? force : !state.satOn;
-    state.satOn = next;
-
-    clearViewOverlays();
-
-    if (!next) {
-      if (state.map.hasLayer(state.satellite)) state.map.removeLayer(state.satellite);
-      setStatus1(`Satellite OFF • roll ${state.selectedRoll ?? ""}`.trim());
-      return;
-    }
-
-    const roll = state.selectedRoll;
-    if (!roll) return setStatus1("Select a parcel first");
-
-    const minz = state.cfg?.map?.satelliteEnableMinZoom ?? 16;
-    if (state.map.getZoom() < minz) state.map.setZoom(minz, { animate: false });
-
-    const snow = state.snowByRoll.get(roll);
-    if (!snow) {
-      state.satOn = false;
-      setStatus1("Snow zone not found (+8m join mismatch?)");
-      return;
-    }
-
-    if (!state.map.hasLayer(state.satellite)) state.satellite.addTo(state.map);
-
-    const gj = snow.toGeoJSON();
-    const geom = gj?.geometry;
-    const rings = polygonLatLngRingsFromGeoJSON(geom);
-    if (!rings) {
-      state.satOn = false;
-      setStatus1("Unable to build mask from snow zone geometry");
-      return;
-    }
-
-    const mask = createOutsideMaskFromGeom(geom, rings, L);
-    if (!mask) {
-      state.satOn = false;
-      setStatus1("Unable to create mask layer");
-      return;
-    }
-
-    state.maskLayer = mask.addTo(state.map);
-    state.snowOutlineLayer = L.geoJSON(gj, { style: STYLE.snowOutline, interactive: false }).addTo(state.map);
-
-    setStatus1(`Satellite ON • roll ${roll}`);
-  }
-
-  // -----------------------------
   // Draw toggle — preserved
   // -----------------------------
   function toggleDraw(force) {
@@ -584,33 +523,8 @@ import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
     satOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
     state.satellite = L.tileLayer(satUrl, satOpt);
 
-    // Keep satellite + mask sticky once enabled (preserved)
-    state.map.on("zoomend", () => {
-      if (!state.satOn) return;
-
-      if (!state.map.hasLayer(state.satellite)) state.satellite.addTo(state.map);
-
-      const roll = state.selectedRoll;
-      if (!roll) return;
-
-      const snow = state.snowByRoll.get(roll);
-      if (!snow) return;
-
-      if (!state.maskLayer || !state.snowOutlineLayer) {
-        clearViewOverlays();
-
-        const gj = snow.toGeoJSON();
-        const geom = gj?.geometry;
-        const rings = polygonLatLngRingsFromGeoJSON(geom);
-        if (!rings) return;
-
-        const mask = createOutsideMaskFromGeom(geom, rings, L);
-        if (!mask) return;
-
-        state.maskLayer = mask.addTo(state.map);
-        state.snowOutlineLayer = L.geoJSON(gj, { style: STYLE.snowOutline, interactive: false }).addTo(state.map);
-      }
-    });
+    // NEW: install sticky zoom behavior (preserved behavior, now in features/satellite.js)
+    installSatelliteStickyZoom(state, { L, snowOutlineStyle: STYLE.snowOutline });
 
     // UI
     state.suggestBox = ensureSuggestBox();
