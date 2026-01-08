@@ -50,12 +50,12 @@
   <!-- MAP -->
   <div id="map" role="application" aria-label="Map"></div>
 
-  <!-- Libraries -->
+  <!-- Libraries (Leaflet must load BEFORE app.js so global `L` exists) -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
   <!-- App logic -->
   <!-- IMPORTANT: this must match your filename in /docs (app.js vs apps.js). -->
-  <script src="./app.js"></script>
+  <script type="module" src="./app.js"></script>
 
   <noscript>
     <div style="padding:10px;font-family:system-ui,Arial,sans-serif;">
