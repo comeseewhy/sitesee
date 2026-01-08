@@ -217,3 +217,214 @@ body {
     padding: 6px 6px;
   }
 }
+
+/* ================================
+   SnowBridge — Floating UI (Panel / Menus / Canvas)
+   Append to end of styles.css
+   ================================ */
+
+:root {
+  --sb-shadow-lg: 0 18px 40px rgba(0,0,0,0.18);
+  --sb-shadow-md: 0 10px 22px rgba(0,0,0,0.14);
+  --sb-radius-lg: 12px;
+  --sb-radius-md: 10px;
+
+  --sb-panel-w: 340px;
+  --sb-panel-h: 360px;
+
+  --sb-surface: #ffffff;
+  --sb-surface-2: #f9fafb;
+  --sb-border: #d1d5db;
+  --sb-text: #111827;
+  --sb-muted: #4b5563;
+
+  --sb-accent: #f59e0b; /* active/query yellow */
+  --sb-focus: rgba(96, 165, 250, 0.28);
+}
+
+/* Ensure floating UI sits above Leaflet panes */
+#addrSuggest { z-index: 9999; }
+#sbCtx { z-index: 10000; }
+#sbPanel { z-index: 10001; }
+#sbCanvas { z-index: 8000; } /* above tiles, below menus/panel */
+
+/* ----------------
+   Suggest dropdown
+   ---------------- */
+#addrSuggest {
+  position: absolute;
+  display: none;
+  max-height: 260px;
+  overflow: auto;
+
+  background: var(--sb-surface);
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-radius-md);
+  box-shadow: var(--sb-shadow-md);
+
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  font-size: 14px;
+
+  /* nicer scrolling */
+  scrollbar-width: thin;
+}
+
+#addrSuggest > div {
+  padding: 10px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#addrSuggest > div:hover {
+  background: #f3f4f6;
+}
+
+/* ----------------
+   Context menu
+   ---------------- */
+#sbCtx {
+  position: absolute;
+  display: none;
+  min-width: 150px;
+  overflow: hidden;
+
+  background: var(--sb-surface);
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-radius-md);
+  box-shadow: var(--sb-shadow-md);
+
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  font-size: 14px;
+}
+
+#sbCtx > div {
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+#sbCtx > div:hover {
+  background: #f3f4f6;
+}
+
+/* ----------------
+   Panel
+   ---------------- */
+#sbPanel {
+  position: absolute;
+  display: none;
+
+  width: var(--sb-panel-w);
+  height: var(--sb-panel-h);
+
+  background: var(--sb-surface);
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-radius-lg);
+  box-shadow: var(--sb-shadow-lg);
+
+  overflow: auto;
+
+  /* keep your native resize handle */
+  resize: both;
+  min-width: 260px;
+  min-height: 220px;
+
+  /* prevent accidental text highlighting while dragging */
+  user-select: none;
+}
+
+#sbPanelHeader {
+  position: sticky;
+  top: 0;
+
+  padding: 10px 12px;
+  border-bottom: 1px solid #e5e7eb;
+
+  font-weight: 650;
+  color: var(--sb-text);
+  background: var(--sb-surface);
+
+  cursor: move;
+}
+
+#sbPanelBody {
+  padding: 10px 12px;
+  user-select: text; /* allow selecting notes inside body */
+}
+
+/* Panel buttons (your mkBtn inline styles still work, this just improves them if you later remove inline) */
+#sbPanelBody button {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  padding: 10px 10px;
+
+  border-radius: var(--sb-radius-md);
+  border: 1px solid var(--sb-border);
+
+  background: var(--sb-surface-2);
+  color: var(--sb-text);
+
+  cursor: pointer;
+  text-align: left;
+
+  transition: background 120ms ease, transform 80ms ease;
+}
+
+#sbPanelBody button:hover { background: #f3f4f6; }
+#sbPanelBody button:active { transform: translateY(1px); }
+
+#sbPanelBody button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--sb-focus);
+}
+
+/* Small helper text inside panel */
+#sbPanelBody .sb-note,
+#sbPanelBody div:last-child {
+  font-size: 13px;
+  color: var(--sb-muted);
+  margin-top: 8px;
+}
+
+/* ----------------
+   Canvas drawing overlay
+   ---------------- */
+#sbCanvas {
+  display: none;
+  pointer-events: none; /* JS enables during draw */
+  touch-action: none;   /* prevent touch scroll while drawing (when enabled) */
+}
+
+/* Optional: when draw mode is enabled, JS sets cursor crosshair.
+   Keep a fallback if you later toggle a class */
+#sbCanvas.is-drawing {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+/* ----------------
+   Mobile behavior
+   ---------------- */
+@media (max-width: 640px) {
+  /* Suggest box should match input width already; ensure it stays readable */
+  #addrSuggest { max-height: 240px; }
+
+  /* Panel becomes a bottom sheet feel */
+  #sbPanel {
+    left: 10px !important;
+    right: 10px !important;
+    width: auto !important;
+
+    top: auto !important;
+    bottom: 10px !important;
+
+    height: 52vh !important;
+    min-height: 240px;
+
+    resize: none; /* mobile resize handles are awkward */
+  }
+}
+
