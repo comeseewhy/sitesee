@@ -14,10 +14,10 @@
   "data": {
     "joinKey": "ROLLNUMSHO",
     "files": {
-      "addresses": "../SnowBridge_addresses_4326.geojson",
-      "parcels": "../SnowBridge_parcels_4326.geojson",
-      "snowZone": "../SnowBridge_parcels_+8m_4326.geojson",
-      "centroids": "../SnowBridge_centroids_4326.geojson"
+      "addresses": "./SnowBridge_addresses_4326.geojson",
+      "parcels": "./SnowBridge_parcels_4326.geojson",
+      "snowZone": "./SnowBridge_parcels_+8m_4326.geojson",
+      "centroids": "./SnowBridge_centroids_4326.geojson"
     },
     "addressLabelFieldsPriority": [
       "ADDR_FULL",
