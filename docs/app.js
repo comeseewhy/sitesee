@@ -2,6 +2,7 @@ import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } fr
 import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
 import { createState } from "./js/core/state.js";
 import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
+import { setStatus, hardFail } from "./js/ui/status.js";
 
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
@@ -24,19 +25,9 @@ import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
     map: $("map"),
     addrInput: $("addrInput"),
     addrBtn: $("addrBtn"),
-    status: $("status"),
+    // status is now handled by ui/status.js (defaults to #status)
     topbar: $("topbar"),
   };
-
-  function setStatus(msg) {
-    if (!el.status) return;
-    el.status.textContent = String(msg ?? "").replace(/\s+/g, " ").trim();
-  }
-
-  function hardFail(msg, err) {
-    console.error(msg, err || "");
-    setStatus(`Error: ${msg}`);
-  }
 
   if (typeof L === "undefined") {
     hardFail("Leaflet failed to load (L is undefined). Check Leaflet <script> tag.");
