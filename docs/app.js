@@ -1,3 +1,5 @@
+import { loadDB, saveDB, getRecord, setRecord, deleteRecord, loadUI, saveUI } from "./js/core/storage.js";
+
 /* SnowBridge — app.js (new interaction model)
    - Overview: address enter / left click / right click(View) enters "Query" stage
    - Query stage: zoom + slow blinking active parcel
@@ -235,62 +237,6 @@
     try {
       if (lock) m.stop();
     } catch {}
-  }
-
-  // -----------------------------
-  // Storage (local only)
-  // -----------------------------
-  const LS_KEY = "snowbridge_v1";
-
-  function loadDB() {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      const obj = raw ? JSON.parse(raw) : {};
-      return obj && typeof obj === "object" ? obj : {};
-    } catch {
-      return {};
-    }
-  }
-
-  function saveDB(db) {
-    localStorage.setItem(LS_KEY, JSON.stringify(db));
-  }
-
-  // schema:
-  // db[roll] = { drawingDataUrl: string, request: { severity:"green|yellow|red", seniors:boolean, estSnow:string, notes:string }, updatedAt:number }
-  function getRecord(roll) {
-    const db = loadDB();
-    return db[String(roll)] || null;
-  }
-
-  function setRecord(roll, rec) {
-    const db = loadDB();
-    db[String(roll)] = rec;
-    saveDB(db);
-  }
-
-  function deleteRecord(roll) {
-    const db = loadDB();
-    delete db[String(roll)];
-    saveDB(db);
-  }
-
-  // -----------------------------
-  // UI storage (panel geometry)
-  // -----------------------------
-  const LS_UI_KEY = "snowbridge_ui_v1";
-
-  function loadUI() {
-    try {
-      return JSON.parse(localStorage.getItem(LS_UI_KEY) || "{}");
-    } catch {
-      return {};
-    }
-  }
-
-  function saveUI(partial) {
-    const cur = loadUI();
-    localStorage.setItem(LS_UI_KEY, JSON.stringify({ ...cur, ...partial }));
   }
 
   // -----------------------------
@@ -1356,11 +1302,7 @@
     }
 
     window.addEventListener("resize", () => positionSuggestBox(state.suggestBox));
-    window.addEventListener(
-      "scroll",
-      () => positionSuggestBox(state.suggestBox),
-      true
-    );
+    window.addEventListener("scroll", () => positionSuggestBox(state.suggestBox), true);
 
     // Load data
     try {
