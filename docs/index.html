@@ -5,6 +5,9 @@
   <title>SnowBridge</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
+  <!-- Basic PWA-ish niceties (harmless, optional) -->
+  <meta name="theme-color" content="#ffffff" />
+
   <!-- Leaflet (NO integrity during early deploy/debug; avoids silent blocking) -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 
@@ -53,9 +56,30 @@
   <!-- Libraries (Leaflet must load BEFORE app.js so global `L` exists) -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
+  <!-- ES module capability shim (kept in this file as requested) -->
+  <script>
+    (function () {
+      try {
+        // If Leaflet failed to load, show it immediately (matches app.js hardFail intent)
+        if (typeof window.L === "undefined") {
+          var s = document.getElementById("status");
+          if (s) s.textContent = "Error: Leaflet failed to load. Check network/CSP.";
+        }
+      } catch (_) {}
+    })();
+  </script>
+
   <!-- App logic -->
   <!-- IMPORTANT: this must match your filename in /docs (app.js vs apps.js). -->
   <script type="module" src="./app.js"></script>
+
+  <!-- No-module fallback (older browsers) -->
+  <script nomodule>
+    (function () {
+      var s = document.getElementById("status");
+      if (s) s.textContent = "Error: This browser does not support ES modules.";
+    })();
+  </script>
 
   <noscript>
     <div style="padding:10px;font-family:system-ui,Arial,sans-serif;">
