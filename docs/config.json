@@ -1,66 +1,161 @@
-{
-  "app": {
-    "name": "SnowBridge",
-    "area": "Waterford, Ontario",
-    "version": "0.1.0"
-  },
-  "map": {
-    "startView": { "lat": 42.93, "lng": -80.28, "zoom": 14 },
-    "maxZoom": 22,
-    "minZoom": 11,
-    "fitPaddingPx": 20,
-    "satelliteEnableMinZoom": 16
-  },
-  "data": {
-    "joinKey": "ROLLNUMSHO",
-    "files": {
-      "addresses": "./SnowBridge_addresses_4326.geojson",
-      "parcels": "./SnowBridge_parcels_4326.geojson",
-      "snowZone": "./SnowBridge_parcels_+8m_4326.geojson",
-      "centroids": "./SnowBridge_centroids_4326.geojson"
-    },
-    "addressLabelFieldsPriority": [
-      "ADDR_FULL",
-      "FULLADDR",
-      "ADDRESS",
-      "ADDR",
-      "STREETADDR"
-    ]
-  },
-  "ui": {
-    "defaultHighlightMode": "parcel",
-    "allowSnowZoneMode": true,
-    "showCentroids": false,
-    "statusLineMaxChars": 120
-  },
-  "style": {
-    "parcel": {
-      "default": { "weight": 1, "opacity": 0.7, "fillOpacity": 0.08 },
-      "selected": { "weight": 3, "opacity": 1.0, "fillOpacity": 0.18 }
-    },
-    "snowZone": {
-      "default": { "weight": 1, "opacity": 0.6, "fillOpacity": 0.06 },
-      "selected": { "weight": 3, "opacity": 1.0, "fillOpacity": 0.16 }
-    }
-  },
-  "basemaps": {
-    "base": {
-      "type": "xyz",
-      "name": "OpenStreetMap",
-      "url": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      "options": {
-        "maxZoom": 19,
-        "attribution": "© OpenStreetMap contributors"
-      }
-    },
-    "satellite": {
-      "type": "xyz",
-      "name": "Satellite (Esri)",
-      "url": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-      "options": {
-        "maxZoom": 19,
-        "attribution": "Tiles © Esri"
-      }
-    }
+/* docs/config.json  (served as an ES module)
+   NOTE: For this to work as a module, this file must be requested with a JS module MIME type.
+   If you still want fetch("./config.json").json() behavior, keep a separate real JSON file.
+   This module provides a compatibility shim via globalThis.__SNOWBRIDGE_CFG__.
+*/
+
+"use strict";
+
+/**
+ * Deep-freeze a plain object/array (fail-soft).
+ * @param {any} v
+ * @returns {any}
+ */
+function deepFreeze(v) {
+  if (!v || typeof v !== "object") return v;
+  try {
+    if (Object.isFrozen(v)) return v;
+    Object.freeze(v);
+    for (const k of Object.keys(v)) deepFreeze(v[k]);
+  } catch {
+    /* no-op */
+  }
+  return v;
+}
+
+/**
+ * Shallow clone via structuredClone when available; JSON fallback.
+ * @param {any} v
+ * @returns {any}
+ */
+function clone(v) {
+  try {
+    if (typeof structuredClone === "function") return structuredClone(v);
+  } catch {}
+  try {
+    return JSON.parse(JSON.stringify(v));
+  } catch {
+    // last-resort: return as-is (callers should treat it as read-only)
+    return v;
   }
 }
+
+/**
+ * Minimal, non-throwing validation (mirrors core/config.js expectation).
+ * @param {any} cfg
+ * @returns {{ ok:boolean, error?:string }}
+ */
+export function validateConfig(cfg) {
+  try {
+    if (!cfg || typeof cfg !== "object") return { ok: false, error: "config is not an object" };
+    if (!cfg?.data?.files?.parcels) return { ok: false, error: "config missing data.files.parcels" };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "config validation threw" };
+  }
+}
+
+/**
+ * The SnowBridge config (matches prior docs/config.json content).
+ * Treat as read-only.
+ */
+export const CFG = deepFreeze({
+  app: {
+    name: "SnowBridge",
+    area: "Waterford, Ontario",
+    version: "0.1.0",
+  },
+  map: {
+    startView: { lat: 42.93, lng: -80.28, zoom: 14 },
+    maxZoom: 22,
+    minZoom: 11,
+    fitPaddingPx: 20,
+    satelliteEnableMinZoom: 16,
+  },
+  data: {
+    joinKey: "ROLLNUMSHO",
+    files: {
+      addresses: "./SnowBridge_addresses_4326.geojson",
+      parcels: "./SnowBridge_parcels_4326.geojson",
+      snowZone: "./SnowBridge_parcels_+8m_4326.geojson",
+      centroids: "./SnowBridge_centroids_4326.geojson",
+    },
+    addressLabelFieldsPriority: ["ADDR_FULL", "FULLADDR", "ADDRESS", "ADDR", "STREETADDR"],
+  },
+  ui: {
+    defaultHighlightMode: "parcel",
+    allowSnowZoneMode: true,
+    showCentroids: false,
+    statusLineMaxChars: 120,
+  },
+  style: {
+    parcel: {
+      default: { weight: 1, opacity: 0.7, fillOpacity: 0.08 },
+      selected: { weight: 3, opacity: 1.0, fillOpacity: 0.18 },
+    },
+    snowZone: {
+      default: { weight: 1, opacity: 0.6, fillOpacity: 0.06 },
+      selected: { weight: 3, opacity: 1.0, fillOpacity: 0.16 },
+    },
+  },
+  basemaps: {
+    base: {
+      type: "xyz",
+      name: "OpenStreetMap",
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      options: {
+        maxZoom: 19,
+        attribution: "© OpenStreetMap contributors",
+      },
+    },
+    satellite: {
+      type: "xyz",
+      name: "Satellite (Esri)",
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      options: {
+        maxZoom: 19,
+        attribution: "Tiles © Esri",
+      },
+    },
+  },
+});
+
+/**
+ * Get a mutable clone (safe for callers that want to edit/merge).
+ * @returns {any}
+ */
+export function getConfig() {
+  return clone(CFG);
+}
+
+/**
+ * Convenience: return a JSON string (useful if a consumer still wants “JSON file” semantics).
+ * @param {number} [space=2]
+ * @returns {string}
+ */
+export function toJSONString(space = 2) {
+  try {
+    return JSON.stringify(CFG, null, Number.isFinite(space) ? space : 2);
+  } catch {
+    return "{}";
+  }
+}
+
+/**
+ * Compatibility shim:
+ * - Makes the config discoverable without import by setting globalThis.__SNOWBRIDGE_CFG__.
+ * - Non-breaking if imported multiple times.
+ */
+export function installGlobalConfigShim() {
+  try {
+    if (typeof globalThis !== "undefined") globalThis.__SNOWBRIDGE_CFG__ = CFG;
+  } catch {
+    /* no-op */
+  }
+  return CFG;
+}
+
+// Install shim immediately on module evaluation (safe default).
+installGlobalConfigShim();
+
+export default CFG;
