@@ -77,17 +77,66 @@ import {
   const setStatus1 = (msg) => setStatus(msg, { maxChars: state.cfg?.ui?.statusLineMaxChars });
 
   // -----------------------------
-  // Styling (preserved)
+  // Styling (default-preserving; config-aware)
   // -----------------------------
-  const STYLE = {
+  const BASE_STYLE = Object.freeze({
     idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" },
     activeParcelA: { weight: 3, opacity: 1, fillOpacity: 0.18, color: "#f59e0b" },
     activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" },
     sizeOutline: { weight: 3, opacity: 1, fillOpacity: 0.0, color: "#111827" },
     snowOutline: { weight: 2, opacity: 1, fillOpacity: 0.0, color: "#ffffff" },
-    // snow base layer style (matches prior buildSnowLayer defaults)
-    snowBase: { weight: 1, opacity: 0.35, fillOpacity: 0.0 },
+    snowBase: { weight: 1, opacity: 0.35, fillOpacity: 0.0 }, // snow base layer style
+  });
+
+  // Will be finalized after cfg loads (but must exist now)
+  const STYLE = {
+    idleParcel: { ...BASE_STYLE.idleParcel },
+    activeParcelA: { ...BASE_STYLE.activeParcelA },
+    activeParcelB: { ...BASE_STYLE.activeParcelB },
+    sizeOutline: { ...BASE_STYLE.sizeOutline },
+    snowOutline: { ...BASE_STYLE.snowOutline },
+    snowBase: { ...BASE_STYLE.snowBase },
   };
+
+  function applyCfgStyleOverrides(cfg) {
+    // Non-breaking: only override fields provided in config.json
+    // config.json includes style.parcel.default/selected and style.snowZone.default/selected
+    const s = cfg?.style || {};
+    const p = s?.parcel || {};
+    const z = s?.snowZone || {};
+
+    // Parcel defaults (keep existing colors)
+    if (p?.default && typeof p.default === "object") {
+      const d = p.default;
+      if (Number.isFinite(d.weight)) STYLE.idleParcel.weight = d.weight;
+      if (Number.isFinite(d.opacity)) STYLE.idleParcel.opacity = d.opacity;
+      if (Number.isFinite(d.fillOpacity)) STYLE.idleParcel.fillOpacity = d.fillOpacity;
+    }
+    if (p?.selected && typeof p.selected === "object") {
+      const sel = p.selected;
+      if (Number.isFinite(sel.weight)) {
+        STYLE.activeParcelA.weight = sel.weight;
+        STYLE.activeParcelB.weight = sel.weight;
+      }
+      if (Number.isFinite(sel.opacity)) STYLE.activeParcelA.opacity = sel.opacity;
+      if (Number.isFinite(sel.fillOpacity)) STYLE.activeParcelA.fillOpacity = sel.fillOpacity;
+      // Keep activeParcelB’s “blink dim” behavior; only allow fillOpacity override if explicitly provided
+      if (Number.isFinite(sel.fillOpacity)) {
+        // B is “dim”; preserve the original dim ratio unless config explicitly wants otherwise
+        // (we’ll keep the existing B fillOpacity unless they add style overrides later)
+      }
+    }
+
+    // Snow base layer defaults
+    if (z?.default && typeof z.default === "object") {
+      const d = z.default;
+      if (Number.isFinite(d.weight)) STYLE.snowBase.weight = d.weight;
+      if (Number.isFinite(d.opacity)) STYLE.snowBase.opacity = d.opacity;
+      if (Number.isFinite(d.fillOpacity)) STYLE.snowBase.fillOpacity = d.fillOpacity;
+    }
+    // We intentionally do not restyle snow outline based on snowZone.selected here;
+    // outline is used by satellite masking and should stay stable unless you decide otherwise.
+  }
 
   function severityStyleForRoll(roll) {
     const rec = getRecord(String(roll));
@@ -258,6 +307,43 @@ import {
   }
 
   // -----------------------------
+  // Optional: centroids layer (cfg.ui.showCentroids)
+  // -----------------------------
+  function maybeAddCentroidsLayer(cfg, joinKey, files) {
+    const show = !!cfg?.ui?.showCentroids;
+    const url = files?.centroids;
+    if (!show || !url) return;
+
+    // Non-interactive markers; fail-soft
+    loadJSON(url)
+      .then((gj) => {
+        const feats = gj?.features || [];
+        if (!Array.isArray(feats) || !feats.length) return;
+
+        // Keep it simple: use circle markers (no extra dependencies)
+        const layer = L.geoJSON(gj, {
+          interactive: false,
+          pointToLayer: (feature, latlng) => {
+            return L.circleMarker(latlng, {
+              radius: 3,
+              weight: 1,
+              opacity: 0.7,
+              fillOpacity: 0.35,
+            });
+          },
+        });
+
+        // Add behind parcels for cleanliness
+        try {
+          layer.addTo(state.map);
+        } catch {}
+      })
+      .catch(() => {
+        // Silent fail-soft; do not spam status line
+      });
+  }
+
+  // -----------------------------
   // Init
   // -----------------------------
   async function init() {
@@ -265,8 +351,23 @@ import {
 
     state.cfg = await loadConfigOrFallback({ onStatus: setStatus1 });
 
+    // Apply style overrides (safe, default-preserving)
+    try {
+      applyCfgStyleOverrides(state.cfg);
+    } catch {}
+
     const joinKey = state.cfg?.data?.joinKey || FALLBACK_CFG.data.joinKey;
     const files = state.cfg?.data?.files || FALLBACK_CFG.data.files;
+
+    // Reflect UI defaults (pure UI, no behavior change)
+    try {
+      const allow = state.cfg?.ui?.allowSnowZoneMode ?? true;
+      if (el.modeToggle) el.modeToggle.disabled = !allow;
+
+      const defMode = String(state.cfg?.ui?.defaultHighlightMode ?? "parcel").toLowerCase();
+      // Only reflect; we do not implement mode behavior here to avoid regressions
+      if (el.modeToggle && allow) el.modeToggle.checked = defMode === "snow" || defMode === "snowzone" || defMode === "snow_zone";
+    } catch {}
 
     // Map
     state.map = L.map("map", { zoomControl: true });
@@ -373,6 +474,11 @@ import {
         state,
         style: STYLE.snowBase,
       }).addTo(state.map);
+
+      // Optional centroids (non-breaking)
+      try {
+        maybeAddCentroidsLayer(state.cfg, joinKey, files);
+      } catch {}
 
       try {
         state.parcelsLayer.bringToFront();
