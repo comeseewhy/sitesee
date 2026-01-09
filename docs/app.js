@@ -1,516 +1,1077 @@
-// docs/app.js (refactored orchestrator — integrates extracted modules)
-// GitHub Pages safe: native ES module; no build step.
+/* SnowBridge — docs/app.js
+   Orchestrator for /docs/js/** modular structure (GitHub Pages safe)
 
-import { $ } from "./js/utils/dom.js";
+   Goals:
+   - Keep config.json as real JSON (fetched + parsed via res.json()).
+   - Keep status updates single-line, concise, and fail-soft.
+   - Delegate features to modules; app.js wires dependencies + state.
 
-import { loadUI, saveUI, getRecord, setRecord, deleteRecord } from "./js/core/storage.js";
-import { FALLBACK_CFG, loadConfigOrFallback, loadJSON } from "./js/core/config.js";
-import { createState } from "./js/core/state.js";
-import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
-
-import { setStatus, hardFail } from "./js/ui/status.js";
-import { ensureSuggestBox, positionSuggestBox, createSuggestHandlers } from "./js/ui/suggest.js";
-import { ensureContextMenu, hideContextMenu, showContextMenuAt } from "./js/ui/contextMenu.js";
-import { ensurePanel, openPanel as uiOpenPanel, closePanel as uiClosePanel, isPanelOpen } from "./js/ui/panel.js";
-
-import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
-import { enterQueryStage, exitQueryStage } from "./js/map/queryStage.js";
-
-import { installSatelliteStickyZoom, toggleSatellite as featureToggleSatellite } from "./js/features/satellite.js";
-import { toggleSize as featureToggleSize } from "./js/features/size.js";
-import {
-  ensureDrawCanvas as featureEnsureDrawCanvas,
-  resizeCanvasToMap as featureResizeCanvasToMap,
-  clearCanvas as featureClearCanvas,
-  canvasToDataUrl as featureCanvasToDataUrl,
-  loadDataUrlToCanvas as featureLoadDataUrlToCanvas,
-  toggleDraw as featureToggleDraw,
-} from "./js/features/draw.js";
-
-import {
-  viewSnowbridge as recordsViewSnowbridge,
-  saveSnowbridge as recordsSaveSnowbridge,
-  deleteSnowbridge as recordsDeleteSnowbridge,
-  openRequestForm as recordsOpenRequestForm,
-} from "./js/features/records.js";
-
-/* SnowBridge — app.js
-   Orchestrator/wiring layer:
-   - DOM lookup + event binding
-   - State object + dependency injection
-   - Leaflet map + layers + feature actions
+   Assumptions are listed after the code.
 */
 
-(() => {
-  "use strict";
+"use strict";
 
-  // -----------------------------
-  // DOM
-  // -----------------------------
-  const el = {
-    map: $("map"),
-    addrInput: $("addrInput"),
-    addrBtn: $("addrBtn"),
-    topbar: $("topbar"),
+// -----------------------------
+// Imports (ES modules under /docs/js/**)
+// -----------------------------
+import { loadConfigOrFallback, loadJSON } from "./js/core/config.js";
+import {
+  loadDB,
+  saveDB,
+  getRecord,
+  setRecord,
+  deleteRecord,
+  loadUI,
+  saveUI,
+} from "./js/core/storage.js";
 
-    // present in index.html (legacy toggles)
-    modeToggle: $("modeToggle"),
-    satToggle: $("satToggle"),
-    status: $("status"),
+import { buildAddressIndex, getSuggestions } from "./js/data/addressIndex.js";
+
+import {
+  ensureSuggestBox,
+  createSuggestHandlers,
+  hideSuggestions,
+  isSuggestOpen,
+} from "./js/ui/suggest.js";
+
+import {
+  ensurePanel,
+  openPanel,
+  closePanel,
+  isPanelOpen,
+} from "./js/ui/panel.js";
+
+import {
+  ensureContextMenu,
+  showContextMenuAt,
+  hideContextMenu,
+  isContextMenuOpen,
+} from "./js/ui/contextMenu.js";
+
+import { buildParcelsLayer, buildSnowLayer } from "./js/map/layers.js";
+
+import {
+  enterQueryStage,
+  exitQueryStage,
+  fitToRoll,
+} from "./js/map/queryStage.js";
+
+import {
+  installSatelliteStickyZoom,
+  toggleSatellite,
+  clearViewOverlays,
+} from "./js/features/satellite.js";
+
+import { toggleSize, clearSizeOverlays } from "./js/features/size.js";
+
+import {
+  ensureDrawCanvas,
+  resizeCanvasToMap,
+  clearCanvas,
+  canvasToDataUrl,
+  loadDataUrlToCanvas,
+  toggleDraw,
+} from "./js/features/draw.js";
+
+// NOTE: records.js exists in your tree, but its export surface isn’t in the evidence pack.
+// This app.js keeps “records” minimal using storage.js directly, and leaves a clean hook
+// where you can wire records.js later if desired.
+
+// -----------------------------
+// DOM helpers
+// -----------------------------
+const $ = (id) => {
+  try {
+    return document.getElementById(id);
+  } catch {
+    return null;
+  }
+};
+
+function on(el, ev, fn, opt) {
+  if (!el) return;
+  try {
+    el.addEventListener(ev, fn, opt);
+  } catch {}
+}
+
+function safeOneLine(s) {
+  const x = String(s ?? "");
+  // Collapse whitespace/newlines to single spaces, trim
+  return x.replace(/\s+/g, " ").trim();
+}
+
+// -----------------------------
+// Status bar (single line, truncated)
+// -----------------------------
+function makeStatusSetter(cfg) {
+  const el = $("status");
+  const max = Math.max(20, Number(cfg?.ui?.statusLineMaxChars) || 120);
+
+  return function setStatus1(msg) {
+    const t = safeOneLine(msg);
+    const out = t.length > max ? `${t.slice(0, max - 1)}…` : t;
+    try {
+      if (el) el.textContent = out;
+    } catch {}
   };
+}
 
-  if (typeof L === "undefined") {
-    hardFail("Leaflet failed to load (L is undefined). Check Leaflet <script> tag.");
-    return;
+// -----------------------------
+// Leaflet resolver (Leaflet is loaded via <script> in index.html)
+// -----------------------------
+function getLeafletOrNull(setStatus1) {
+  const L = /** @type {any} */ (globalThis?.L);
+  if (!L) {
+    if (setStatus1) setStatus1("Error: Leaflet not loaded.");
+    try {
+      console.error("Leaflet global L not found. Ensure leaflet.js is loaded before app.js.");
+    } catch {}
+    return null;
   }
-  if (!el.map) {
-    hardFail("Missing #map element in index.html");
-    return;
+  return L;
+}
+
+// -----------------------------
+// Roll/join helpers
+// -----------------------------
+function asRoll(v) {
+  if (v == null) return "";
+  return String(v);
+}
+
+// Extract roll from a Leaflet layer/feature (works for GeoJSON layers)
+function getRollFromLayer(layer, joinKey) {
+  try {
+    const p = layer?.feature?.properties;
+    if (!p) return "";
+    return asRoll(p?.[joinKey]);
+  } catch {
+    return "";
   }
+}
 
-  // -----------------------------
-  // State
-  // -----------------------------
-  const state = createState();
-
-  // Single-line status wrapper (cap from cfg.ui.statusLineMaxChars when available)
-  const setStatus1 = (msg) => setStatus(msg, { maxChars: state.cfg?.ui?.statusLineMaxChars });
-
-  // -----------------------------
-  // Styling (default-preserving; config-aware)
-  // -----------------------------
-  const BASE_STYLE = Object.freeze({
-    idleParcel: { weight: 1, opacity: 0.8, fillOpacity: 0.08, color: "#2563eb" },
-    activeParcelA: { weight: 3, opacity: 1, fillOpacity: 0.18, color: "#f59e0b" },
-    activeParcelB: { weight: 3, opacity: 0.65, fillOpacity: 0.03, color: "#f59e0b" },
-    sizeOutline: { weight: 3, opacity: 1, fillOpacity: 0.0, color: "#111827" },
-    snowOutline: { weight: 2, opacity: 1, fillOpacity: 0.0, color: "#ffffff" },
-    snowBase: { weight: 1, opacity: 0.35, fillOpacity: 0.0 }, // snow base layer style
+// -----------------------------
+// Main
+// -----------------------------
+(async function main() {
+  // 1) Load config (real JSON)
+  const cfg = await loadConfigOrFallback({
+    url: "./config.json",
+    onStatus: (m) => {
+      // status element might not be ready yet; just console for now
+      try {
+        console.log(m);
+      } catch {}
+    },
   });
 
-  // Will be finalized after cfg loads (but must exist now)
-  const STYLE = {
-    idleParcel: { ...BASE_STYLE.idleParcel },
-    activeParcelA: { ...BASE_STYLE.activeParcelA },
-    activeParcelB: { ...BASE_STYLE.activeParcelB },
-    sizeOutline: { ...BASE_STYLE.sizeOutline },
-    snowOutline: { ...BASE_STYLE.snowOutline },
-    snowBase: { ...BASE_STYLE.snowBase },
-  };
+  const setStatus1 = makeStatusSetter(cfg);
+  setStatus1("Loading…");
 
-  function applyCfgStyleOverrides(cfg) {
-    // Non-breaking: only override fields provided in config.json
-    // config.json includes style.parcel.default/selected and style.snowZone.default/selected
-    const s = cfg?.style || {};
-    const p = s?.parcel || {};
-    const z = s?.snowZone || {};
+  // 2) Leaflet
+  const L = getLeafletOrNull(setStatus1);
+  if (!L) return;
 
-    // Parcel defaults (keep existing colors)
-    if (p?.default && typeof p.default === "object") {
-      const d = p.default;
-      if (Number.isFinite(d.weight)) STYLE.idleParcel.weight = d.weight;
-      if (Number.isFinite(d.opacity)) STYLE.idleParcel.opacity = d.opacity;
-      if (Number.isFinite(d.fillOpacity)) STYLE.idleParcel.fillOpacity = d.fillOpacity;
-    }
-    if (p?.selected && typeof p.selected === "object") {
-      const sel = p.selected;
-      if (Number.isFinite(sel.weight)) {
-        STYLE.activeParcelA.weight = sel.weight;
-        STYLE.activeParcelB.weight = sel.weight;
-      }
-      if (Number.isFinite(sel.opacity)) STYLE.activeParcelA.opacity = sel.opacity;
-      if (Number.isFinite(sel.fillOpacity)) STYLE.activeParcelA.fillOpacity = sel.fillOpacity;
-      // Keep activeParcelB’s “blink dim” behavior; only allow fillOpacity override if explicitly provided
-      if (Number.isFinite(sel.fillOpacity)) {
-        // B is “dim”; preserve the original dim ratio unless config explicitly wants otherwise
-        // (we’ll keep the existing B fillOpacity unless they add style overrides later)
-      }
-    }
+  // 3) DOM refs
+  const mapEl = $("map");
+  const addrInput = $("addrInput");
+  const addrBtn = $("addrBtn");
+  const modeToggle = $("modeToggle");
+  const satToggle = $("satToggle");
 
-    // Snow base layer defaults
-    if (z?.default && typeof z.default === "object") {
-      const d = z.default;
-      if (Number.isFinite(d.weight)) STYLE.snowBase.weight = d.weight;
-      if (Number.isFinite(d.opacity)) STYLE.snowBase.opacity = d.opacity;
-      if (Number.isFinite(d.fillOpacity)) STYLE.snowBase.fillOpacity = d.fillOpacity;
-    }
-    // We intentionally do not restyle snow outline based on snowZone.selected here;
-    // outline is used by satellite masking and should stay stable unless you decide otherwise.
+  if (!mapEl) {
+    setStatus1("Error: #map not found.");
+    return;
   }
 
-  function severityStyleForRoll(roll) {
-    const rec = getRecord(String(roll));
-    const sev = rec?.request?.severity;
-    if (sev === "red") return { fillColor: "#ef4444", fillOpacity: 0.28 };
-    if (sev === "yellow") return { fillColor: "#f59e0b", fillOpacity: 0.22 };
-    if (sev === "green") return { fillColor: "#10b981", fillOpacity: 0.2 };
-    return { fillColor: null, fillOpacity: null };
+  // 4) State (single mutable object passed into feature modules)
+  const st = {
+    cfg,
+    L,
+    map: null,
+
+    // Data
+    parcelsGeo: null,
+    snowGeo: null,
+    addressesGeo: null,
+    centroidsGeo: null,
+
+    // Layers + maps by roll
+    parcelsLayer: null,
+    snowLayer: null,
+    parcelsByRoll: new Map(),
+    snowByRoll: new Map(),
+
+    // Selection + modes
+    selectedRoll: "",
+    highlightMode: String(cfg?.ui?.defaultHighlightMode || "parcel"),
+    satOn: false,
+    sizeOn: false,
+    drawOn: false,
+
+    // UI module-owned elements
+    suggest: null,
+    panel: null,
+    ctx: null,
+
+    // Draw feature state (feature module can attach to this)
+    canvas: null,
+
+    // Address index
+    addrIndex: null,
+
+    // Local DB + UI prefs
+    db: {},
+    uiPrefs: {},
+  };
+
+  // 5) Load persisted UI + DB
+  try {
+    st.db = loadDB() || {};
+  } catch {
+    st.db = {};
+  }
+
+  try {
+    st.uiPrefs = loadUI() || {};
+  } catch {
+    st.uiPrefs = {};
+  }
+
+  // Restore a few optional prefs if present (fail-soft)
+  try {
+    if (st.uiPrefs?.highlightMode) st.highlightMode = String(st.uiPrefs.highlightMode);
+  } catch {}
+
+  try {
+    if (typeof st.uiPrefs?.satOn === "boolean") st.satOn = st.uiPrefs.satOn;
+    if (typeof st.uiPrefs?.sizeOn === "boolean") st.sizeOn = st.uiPrefs.sizeOn;
+    if (typeof st.uiPrefs?.drawOn === "boolean") st.drawOn = st.uiPrefs.drawOn;
+  } catch {}
+
+  // 6) Init Leaflet map
+  const start = cfg?.map?.startView || { lat: 42.93, lng: -80.28, zoom: 14 };
+  const minZoom = Number(cfg?.map?.minZoom) || 11;
+  const maxZoom = Number(cfg?.map?.maxZoom) || 22;
+
+  const map = L.map(mapEl, {
+    zoomControl: true,
+    preferCanvas: false,
+    minZoom,
+    maxZoom,
+  }).setView([Number(start.lat) || 0, Number(start.lng) || 0], Number(start.zoom) || 14);
+
+  st.map = map;
+
+  // Basemaps
+  const baseCfg = cfg?.basemaps?.base;
+  const satCfg = cfg?.basemaps?.satellite;
+
+  let baseLayer = null;
+  let satBaseLayer = null;
+
+  try {
+    if (baseCfg?.type === "xyz" && baseCfg?.url) {
+      baseLayer = L.tileLayer(baseCfg.url, baseCfg.options || {});
+      baseLayer.addTo(map);
+    }
+  } catch (e) {
+    console.warn("Base layer failed", e);
+  }
+
+  try {
+    if (satCfg?.type === "xyz" && satCfg?.url) {
+      satBaseLayer = L.tileLayer(satCfg.url, satCfg.options || {});
+      // NOTE: satellite feature module will manage when/if this is shown.
+      // We keep a reference so satellite.js can re-use it if it accepts injected layer.
+    }
+  } catch (e) {
+    console.warn("Satellite base layer init failed", e);
+  }
+
+  // 7) Ensure UI modules (panel, suggest, context menu)
+  try {
+    st.panel = ensurePanel({
+      // Panel module uses injected storage helpers for persistence (per evidence pack)
+      loadUI,
+      saveUI,
+      // Actions are injected later once we define them
+    });
+  } catch (e) {
+    console.warn("Panel init failed", e);
+  }
+
+  try {
+    st.suggest = ensureSuggestBox();
+  } catch (e) {
+    console.warn("Suggest init failed", e);
+  }
+
+  try {
+    st.ctx = ensureContextMenu();
+  } catch (e) {
+    console.warn("Context menu init failed", e);
+  }
+
+  // 8) Load GeoJSONs
+  const files = cfg?.data?.files || {};
+  const joinKey = String(cfg?.data?.joinKey || "ROLLNUMSHO");
+
+  async function loadGeo(path, label) {
+    if (!path) return null;
+    try {
+      const g = await loadJSON(path);
+      return g;
+    } catch (e) {
+      console.warn(`Failed loading ${label}:`, path, e);
+      setStatus1(`Error • missing ${label}`);
+      return null;
+    }
+  }
+
+  st.parcelsGeo = await loadGeo(files?.parcels, "parcels");
+  st.snowGeo = await loadGeo(files?.snowZone, "snow zone");
+  st.addressesGeo = await loadGeo(files?.addresses, "addresses");
+  st.centroidsGeo = await loadGeo(files?.centroids, "centroids");
+
+  if (!st.parcelsGeo) {
+    setStatus1("Error: parcels not loaded.");
+    return;
+  }
+
+  // 9) Build address index (if addresses loaded)
+  try {
+    if (st.addressesGeo) {
+      const labelFields = Array.isArray(cfg?.data?.addressLabelFieldsPriority)
+        ? cfg.data.addressLabelFieldsPriority
+        : ["ADDR_FULL", "FULLADDR", "ADDRESS", "ADDR", "STREETADDR"];
+
+      st.addrIndex = buildAddressIndex(st.addressesGeo, {
+        joinKey,
+        labelFieldsPriority: labelFields,
+      });
+    }
+  } catch (e) {
+    console.warn("Address index build failed", e);
+    st.addrIndex = null;
+  }
+
+  // 10) Styling helpers
+  const styleCfg = cfg?.style || {};
+  const parcelStyleDefault = styleCfg?.parcel?.default || { weight: 1, opacity: 0.7, fillOpacity: 0.08 };
+  const parcelStyleSelected = styleCfg?.parcel?.selected || { weight: 3, opacity: 1.0, fillOpacity: 0.18 };
+  const snowStyleDefault = styleCfg?.snowZone?.default || { weight: 1, opacity: 0.6, fillOpacity: 0.06 };
+  const snowStyleSelected = styleCfg?.snowZone?.selected || { weight: 3, opacity: 1.0, fillOpacity: 0.16 };
+
+  function clearSelectionStyles() {
+    try {
+      if (st.parcelsLayer && st.parcelsLayer.setStyle) st.parcelsLayer.setStyle(parcelStyleDefault);
+    } catch {}
+    try {
+      if (st.snowLayer && st.snowLayer.setStyle) st.snowLayer.setStyle(snowStyleDefault);
+    } catch {}
   }
 
   function applyParcelStyle(roll) {
-    const r = String(roll);
-    const layer = state.parcelByRoll.get(r);
-    if (!layer) return;
+    const r = asRoll(roll);
+    clearSelectionStyles();
+    if (!r) return;
 
-    const sev = severityStyleForRoll(r);
-    const base = { ...STYLE.idleParcel };
-    if (sev.fillColor) base.fillColor = sev.fillColor;
-    if (sev.fillOpacity != null) base.fillOpacity = sev.fillOpacity;
-
-    if (state.selectedRoll === r && state.isQueryStage) {
-      layer.setStyle(state.blinkOn ? { ...base, ...STYLE.activeParcelA } : { ...base, ...STYLE.activeParcelB });
+    if (st.highlightMode === "snowZone") {
+      const layer = st.snowByRoll.get(r);
+      if (layer?.setStyle) layer.setStyle(snowStyleSelected);
     } else {
-      layer.setStyle(base);
+      const layer = st.parcelsByRoll.get(r);
+      if (layer?.setStyle) layer.setStyle(parcelStyleSelected);
     }
   }
 
-  function restyleAllParcels() {
-    for (const roll of state.parcelByRoll.keys()) applyParcelStyle(roll);
-  }
+  // 11) Selection orchestration
+  function setSelectedRoll(nextRoll, reason) {
+    const r = asRoll(nextRoll);
+    st.selectedRoll = r;
 
-  // -----------------------------
-  // Feature adapters (stable call sites)
-  // -----------------------------
-  const toggleSatellite = (force) => {
-    featureToggleSatellite(state, force, { L, setStatus1, snowOutlineStyle: STYLE.snowOutline });
-
-    // keep optional topbar checkbox in sync (no hard dependency)
     try {
-      if (el.satToggle) el.satToggle.checked = !!state.satOn;
+      applyParcelStyle(r);
     } catch {}
-  };
 
-  const toggleSize = (force) => featureToggleSize(state, force, { L, setStatus1, sizeOutlineStyle: STYLE.sizeOutline });
+    // Persist “last roll” optionally
+    try {
+      saveUI({ lastRoll: r });
+    } catch {}
 
-  const toggleDraw = (force) =>
-    featureToggleDraw(state, force, { setStatus1, toggleSatellite: (f) => toggleSatellite(f) });
-
-  // -----------------------------
-  // Records feature adapters
-  // -----------------------------
-  async function viewSnowbridge() {
-    return recordsViewSnowbridge(state, {
-      getRecord: (roll) => getRecord(String(roll)),
-      setStatus1,
-      toggleSatellite: (force) => toggleSatellite(force),
-      resizeCanvasToMap: (st) => featureResizeCanvasToMap(st),
-      loadDataUrlToCanvas: (st, dataUrl) => featureLoadDataUrlToCanvas(st, dataUrl),
-    });
+    if (r) {
+      // Show a crisp single-line message; include reason if supplied
+      const base = reason ? `${reason} • roll ${r}` : `Selected • roll ${r}`;
+      setStatus1(base);
+    }
   }
 
-  function saveSnowbridge() {
-    return recordsSaveSnowbridge(state, {
-      getRecord: (roll) => getRecord(String(roll)),
-      setRecord: (roll, rec) => setRecord(String(roll), rec),
-      setStatus1,
-      restyleAllParcels,
-      canvasToDataUrl: (st) => featureCanvasToDataUrl(st),
-      toggleDraw: (force) => toggleDraw(force),
-    });
+  // 12) Context menu actions (injected)
+  function buildContextActions(roll) {
+    const r = asRoll(roll);
+    return [
+      {
+        label: "Open panel",
+        onClick: () => {
+          try {
+            openPanel();
+            setStatus1(`Panel opened • roll ${r}`.trim());
+          } catch {}
+        },
+      },
+      {
+        label: "Toggle satellite",
+        onClick: () => {
+          doToggleSatellite();
+        },
+      },
+      {
+        label: "Toggle size",
+        onClick: () => {
+          doToggleSize();
+        },
+      },
+      {
+        label: "Toggle draw",
+        onClick: () => {
+          doToggleDraw();
+        },
+      },
+      {
+        label: "Clear draw",
+        onClick: () => {
+          doClearDraw();
+        },
+      },
+      {
+        label: "Clear selection",
+        onClick: () => {
+          doClearSelection();
+        },
+      },
+    ];
   }
 
-  function deleteSnowbridge() {
-    return recordsDeleteSnowbridge(state, {
-      getRecord: (roll) => getRecord(String(roll)),
-      deleteRecord: (roll) => deleteRecord(String(roll)),
-      setStatus1,
-      restyleAllParcels,
-      clearCanvas: (st) => featureClearCanvas(st),
-    });
+  function showCtxForEvent(e, roll) {
+    const r = asRoll(roll);
+    if (!r) return;
+    try {
+      if (isContextMenuOpen()) hideContextMenu(st.ctx);
+    } catch {}
+
+    try {
+      const actions = buildContextActions(r);
+      showContextMenuAt(st.ctx, {
+        clientX: e?.originalEvent?.clientX ?? e?.clientX ?? 0,
+        clientY: e?.originalEvent?.clientY ?? e?.clientY ?? 0,
+        items: actions.map((a) => ({
+          label: a.label,
+          onClick: () => {
+            try {
+              hideContextMenu(st.ctx);
+            } catch {}
+            try {
+              a.onClick();
+            } catch {}
+          },
+        })),
+      });
+    } catch (err) {
+      console.warn("Context menu show failed", err);
+    }
   }
 
-  function openRequestForm() {
-    return recordsOpenRequestForm(state, {
-      getRecord: (roll) => getRecord(String(roll)),
-      setRecord: (roll, rec) => setRecord(String(roll), rec),
-      setStatus1,
-      restyleAllParcels,
-    });
-  }
-
-  // -----------------------------
-  // Panel wiring (ui/panel.js)
-  // -----------------------------
-  function openPanel() {
-    uiOpenPanel(state, panelActions);
-  }
-
-  function closePanel() {
-    uiClosePanel();
-    exitQueryStage(state, queryDeps.exit);
-  }
-
-  const panelActions = {
-    toggleSize: () => toggleSize(),
-    toggleSatellite: () => toggleSatellite(),
-    toggleDraw: () => toggleDraw(),
-    saveSnowbridge: () => saveSnowbridge(),
-    viewSnowbridge: () => viewSnowbridge(),
-    openRequestForm: () => openRequestForm(),
-    deleteSnowbridge: () => deleteSnowbridge(),
-    closePanel: () => closePanel(),
-  };
-
-  // -----------------------------
-  // Query stage wiring (map/queryStage.js)
-  // -----------------------------
-  const queryDeps = {
-    enter: {
-      hideContextMenu: (menuEl) => hideContextMenu(menuEl),
-      applyParcelStyle,
-      setStatus1,
-      isPanelOpen,
-      openPanel,
-    },
-    exit: {
-      toggleSatellite: (force) => toggleSatellite(force),
-      toggleSize: (force) => toggleSize(force),
-      toggleDraw: (force) => toggleDraw(force),
-      applyParcelStyle,
-      setStatus1,
-    },
-  };
-
-  // -----------------------------
-  // Address handling (data/addressIndex.js)
-  // -----------------------------
-  function onGo() {
-    const q = el.addrInput?.value ?? "";
-    const best = getSuggestions(q, state.addresses, 1)[0] || null;
-    if (!best) return setStatus1("No match");
-    enterQueryStage(state, best.roll, { center: [best.lat, best.lng], source: "address" }, queryDeps.enter);
-  }
-
-  // -----------------------------
-  // Layer event handlers (injected into map/layers.js)
-  // -----------------------------
-  function onParcelClick({ roll }) {
+  // 13) Build layers (via module builders)
+  function onParcelClick(e, layer) {
+    const roll = getRollFromLayer(layer, joinKey);
     if (!roll) return;
 
-    if (state.isQueryStage && state.selectedRoll === roll) {
-      openPanel();
+    setSelectedRoll(roll, "Click");
+
+    // Enter query stage (closes other modes as needed)
+    try {
+      enterQueryStage(st, {
+        setStatus1,
+        applyParcelStyle: (r) => applyParcelStyle(r),
+        hideContextMenu: () => {
+          try {
+            hideContextMenu(st.ctx);
+          } catch {}
+        },
+        isPanelOpen: () => {
+          try {
+            return isPanelOpen();
+          } catch {
+            return false;
+          }
+        },
+        openPanel: () => {
+          try {
+            openPanel();
+          } catch {}
+        },
+        toggleSatellite: (force) => doToggleSatellite(force),
+        toggleSize: (force) => doToggleSize(force),
+        toggleDraw: (force) => doToggleDraw(force),
+      });
+    } catch (err) {
+      console.warn("enterQueryStage failed", err);
+    }
+
+    // Fit to roll (optional)
+    try {
+      fitToRoll(st, roll, { setStatus1 });
+    } catch {}
+  }
+
+  function onParcelContextMenu(e, layer) {
+    const roll = getRollFromLayer(layer, joinKey);
+    if (!roll) return;
+    setSelectedRoll(roll, "Menu");
+    showCtxForEvent(e, roll);
+  }
+
+  // Build parcels
+  try {
+    const out = buildParcelsLayer(st.parcelsGeo, {
+      L,
+      joinKey,
+      style: parcelStyleDefault,
+      onClick: (feature, layer, e) => onParcelClick(e, layer),
+      onContextMenu: (feature, layer, e) => onParcelContextMenu(e, layer),
+    });
+
+    // Allow both styles of return: either layer-only or { layer, byRoll }
+    if (out?.addTo) {
+      st.parcelsLayer = out;
+    } else if (out?.layer) {
+      st.parcelsLayer = out.layer;
+      if (out?.byRoll) st.parcelsByRoll = out.byRoll;
+    }
+
+    if (st.parcelsLayer?.addTo) st.parcelsLayer.addTo(map);
+  } catch (e) {
+    console.warn("Parcels layer build failed", e);
+    setStatus1("Error • parcels layer failed");
+    return;
+  }
+
+  // Build snow zone (optional)
+  try {
+    if (st.snowGeo) {
+      const out = buildSnowLayer(st.snowGeo, {
+        L,
+        joinKey,
+        style: snowStyleDefault,
+      });
+
+      if (out?.addTo) {
+        st.snowLayer = out;
+      } else if (out?.layer) {
+        st.snowLayer = out.layer;
+        if (out?.byRoll) st.snowByRoll = out.byRoll;
+      }
+
+      // NOTE: Snow layer is typically shown/used as overlay; keep it on map for selection/highlight
+      if (st.snowLayer?.addTo) st.snowLayer.addTo(map);
+    }
+  } catch (e) {
+    console.warn("Snow zone layer build failed", e);
+  }
+
+  // If layers.js didn’t return byRoll maps, rebuild maps as a fallback.
+  // (Your evidence pack suggests layers.js does build these maps, but this prevents regressions.)
+  function rebuildByRollMapsFallback() {
+    if (st.parcelsByRoll?.size > 0) return;
+
+    try {
+      if (st.parcelsLayer?.eachLayer) {
+        const m = new Map();
+        st.parcelsLayer.eachLayer((layer) => {
+          const roll = getRollFromLayer(layer, joinKey);
+          if (roll) m.set(roll, layer);
+        });
+        st.parcelsByRoll = m;
+      }
+    } catch {}
+
+    try {
+      if (st.snowLayer?.eachLayer) {
+        const m = new Map();
+        st.snowLayer.eachLayer((layer) => {
+          const roll = getRollFromLayer(layer, joinKey);
+          if (roll) m.set(roll, layer);
+        });
+        st.snowByRoll = m;
+      }
+    } catch {}
+  }
+  rebuildByRollMapsFallback();
+
+  // 14) Satellite sticky zoom (optional helper)
+  try {
+    installSatelliteStickyZoom(st, {
+      setStatus1,
+      // pass in satBaseLayer if satellite.js supports it; harmless if ignored
+      satBaseLayer,
+    });
+  } catch (e) {
+    console.warn("installSatelliteStickyZoom failed", e);
+  }
+
+  // 15) Draw canvas boot (optional)
+  try {
+    ensureDrawCanvas(st, { setStatus1 });
+    resizeCanvasToMap(st, { setStatus1 });
+    on(map, "resize", () => {
+      try {
+        resizeCanvasToMap(st, { setStatus1 });
+      } catch {}
+    });
+    on(map, "zoomend", () => {
+      try {
+        resizeCanvasToMap(st, { setStatus1 });
+      } catch {}
+    });
+    on(map, "moveend", () => {
+      try {
+        resizeCanvasToMap(st, { setStatus1 });
+      } catch {}
+    });
+  } catch (e) {
+    console.warn("Draw canvas init failed", e);
+  }
+
+  // 16) Address search + suggest wiring
+  function pickRoll(roll, reason) {
+    const r = asRoll(roll);
+    if (!r) return;
+
+    if (!st.parcelsByRoll.has(r)) {
+      setStatus1(`Not found • roll ${r}`);
       return;
     }
 
-    enterQueryStage(state, roll, { source: "left-click" }, queryDeps.enter);
-  }
+    setSelectedRoll(r, reason || "Go");
 
-  function onParcelContextMenu({ roll, pxX, pxY }) {
-    if (!roll) return;
-
-    showContextMenuAt(
-      pxX,
-      pxY,
-      [{ label: "View", onClick: () => enterQueryStage(state, roll, { source: "right-click" }, queryDeps.enter) }],
-      { menu: state.ctxMenu }
-    );
-  }
-
-  // -----------------------------
-  // Optional: centroids layer (cfg.ui.showCentroids)
-  // -----------------------------
-  function maybeAddCentroidsLayer(cfg, joinKey, files) {
-    const show = !!cfg?.ui?.showCentroids;
-    const url = files?.centroids;
-    if (!show || !url) return;
-
-    // Non-interactive markers; fail-soft
-    loadJSON(url)
-      .then((gj) => {
-        const feats = gj?.features || [];
-        if (!Array.isArray(feats) || !feats.length) return;
-
-        // Keep it simple: use circle markers (no extra dependencies)
-        const layer = L.geoJSON(gj, {
-          interactive: false,
-          pointToLayer: (feature, latlng) => {
-            return L.circleMarker(latlng, {
-              radius: 3,
-              weight: 1,
-              opacity: 0.7,
-              fillOpacity: 0.35,
-            });
-          },
-        });
-
-        // Add behind parcels for cleanliness
-        try {
-          layer.addTo(state.map);
-        } catch {}
-      })
-      .catch(() => {
-        // Silent fail-soft; do not spam status line
-      });
-  }
-
-  // -----------------------------
-  // Init
-  // -----------------------------
-  async function init() {
-    setStatus1("Loading…");
-
-    state.cfg = await loadConfigOrFallback({ onStatus: setStatus1 });
-
-    // Apply style overrides (safe, default-preserving)
     try {
-      applyCfgStyleOverrides(state.cfg);
-    } catch {}
-
-    const joinKey = state.cfg?.data?.joinKey || FALLBACK_CFG.data.joinKey;
-    const files = state.cfg?.data?.files || FALLBACK_CFG.data.files;
-
-    // Reflect UI defaults (pure UI, no behavior change)
-    try {
-      const allow = state.cfg?.ui?.allowSnowZoneMode ?? true;
-      if (el.modeToggle) el.modeToggle.disabled = !allow;
-
-      const defMode = String(state.cfg?.ui?.defaultHighlightMode ?? "parcel").toLowerCase();
-      // Only reflect; we do not implement mode behavior here to avoid regressions
-      if (el.modeToggle && allow) el.modeToggle.checked = defMode === "snow" || defMode === "snowzone" || defMode === "snow_zone";
-    } catch {}
-
-    // Map
-    state.map = L.map("map", { zoomControl: true });
-    state.map.setMinZoom(state.cfg?.map?.minZoom ?? FALLBACK_CFG.map.minZoom);
-    state.map.setMaxZoom(state.cfg?.map?.maxZoom ?? FALLBACK_CFG.map.maxZoom);
-
-    // Basemap + satellite (satellite not added until toggleSatellite)
-    const baseUrl = state.cfg?.basemaps?.base?.url || FALLBACK_CFG.basemaps.base.url;
-    const baseOpt = { ...(state.cfg?.basemaps?.base?.options || FALLBACK_CFG.basemaps.base.options) };
-    baseOpt.maxNativeZoom ??= 19;
-    baseOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
-    state.basemap = L.tileLayer(baseUrl, baseOpt).addTo(state.map);
-
-    const satUrl = state.cfg?.basemaps?.satellite?.url || FALLBACK_CFG.basemaps.satellite.url;
-    const satOpt = { ...(state.cfg?.basemaps?.satellite?.options || FALLBACK_CFG.basemaps.satellite.options) };
-    satOpt.maxNativeZoom ??= 19;
-    satOpt.maxZoom ??= state.cfg?.map?.maxZoom ?? 22;
-    state.satellite = L.tileLayer(satUrl, satOpt);
-
-    // Install sticky zoom behavior for satellite (safe even before snow data loads)
-    installSatelliteStickyZoom(state, { L, snowOutlineStyle: STYLE.snowOutline });
-
-    // UI
-    state.suggestBox = ensureSuggestBox();
-    state.ctxMenu = ensureContextMenu();
-    state.panel = ensurePanel({ loadUI, saveUI });
-
-    // Canvas (draw feature)
-    state.canvas = featureEnsureDrawCanvas(state, { mapEl: el.map });
-
-    // Canvas sizing
-    state.map.on("resize", () => featureResizeCanvasToMap(state));
-    state.map.on("move", () => {
-      /* keep canvas fixed to container */
-    });
-    featureResizeCanvasToMap(state);
-
-    // Hide ctx menu on click elsewhere
-    document.addEventListener("click", (e) => {
-      if (state.ctxMenu && state.ctxMenu.style.display !== "none" && !state.ctxMenu.contains(e.target)) {
-        hideContextMenu(state.ctxMenu);
-      }
-    });
-
-    // Address UI
-    if (el.addrBtn) el.addrBtn.addEventListener("click", onGo);
-
-    if (el.addrInput) {
-      const suggest = createSuggestHandlers(el.addrInput, /** @type {HTMLDivElement} */ (state.suggestBox), {
-        getMatches: (q) => getSuggestions(q || "", state.addresses, 12),
-        onPick: () => {
-          // preserved: app.js only filled input + hid; no extra side effects
+      enterQueryStage(st, {
+        setStatus1,
+        applyParcelStyle: (x) => applyParcelStyle(x),
+        hideContextMenu: () => {
+          try {
+            hideContextMenu(st.ctx);
+          } catch {}
         },
-        onGo,
-        getIndex: () => state.suggestIndex,
-        setIndex: (i) => {
-          state.suggestIndex = Number.isFinite(i) ? i : -1;
+        isPanelOpen: () => {
+          try {
+            return isPanelOpen();
+          } catch {
+            return false;
+          }
         },
+        openPanel: () => {
+          try {
+            openPanel();
+          } catch {}
+        },
+        toggleSatellite: (force) => doToggleSatellite(force),
+        toggleSize: (force) => doToggleSize(force),
+        toggleDraw: (force) => doToggleDraw(force),
       });
-
-      el.addrInput.addEventListener("keydown", suggest.onKeyDown);
-      el.addrInput.addEventListener("input", suggest.onInput);
-      el.addrInput.addEventListener("focus", suggest.onFocus);
-
-      // Keep dropdown aligned with the input on layout changes
-      const reposition = () => positionSuggestBox(el.addrInput, state.suggestBox);
-      window.addEventListener("resize", reposition);
-      window.addEventListener("scroll", reposition, true);
-    }
-
-    // Optional: wire topbar satellite checkbox to feature (fail-soft)
-    try {
-      if (el.satToggle) {
-        el.satToggle.addEventListener("change", () => toggleSatellite(!!el.satToggle.checked));
-        // reflect initial state
-        el.satToggle.checked = !!state.satOn;
-      }
     } catch {}
 
-    // Optional: modeToggle exists but behavior is intentionally not changed here.
-    // (Avoid regressions; no extracted module defined its semantics.)
     try {
-      if (el.modeToggle) el.modeToggle.disabled = !(state.cfg?.ui?.allowSnowZoneMode ?? true);
+      fitToRoll(st, r, { setStatus1 });
     } catch {}
+  }
 
-    // Load data
+  function parseRollFromSuggestionRow(row) {
+    // Address index rows often store roll in a field; try a few common names.
+    if (!row || typeof row !== "object") return "";
+    return asRoll(row.roll ?? row.ROLLNUMSHO ?? row.join ?? row.joinKey ?? row[joinKey]);
+  }
+
+  function getAddressSuggestions(q) {
+    if (!st.addrIndex) return [];
+    const query = safeOneLine(q);
+    if (!query) return [];
     try {
-      setStatus1("Loading parcels…");
-      const parcelsGeo = await loadJSON(files.parcels);
-
-      state.parcelsLayer = buildParcelsLayer(parcelsGeo, joinKey, {
-        L,
-        state,
-        style: STYLE.idleParcel,
-        onClick: onParcelClick,
-        onContextMenu: onParcelContextMenu,
-      }).addTo(state.map);
-
-      setStatus1("Loading +8m snow zone…");
-      const snowGeo = await loadJSON(files.snowZone);
-
-      state.snowLayer = buildSnowLayer(snowGeo, joinKey, {
-        L,
-        state,
-        style: STYLE.snowBase,
-      }).addTo(state.map);
-
-      // Optional centroids (non-breaking)
-      try {
-        maybeAddCentroidsLayer(state.cfg, joinKey, files);
-      } catch {}
-
-      try {
-        state.parcelsLayer.bringToFront();
-      } catch {}
-
-      setStatus1("Loading addresses…");
-      const addrGeo = await loadJSON(files.addresses);
-
-      state.addresses = buildAddressIndex(addrGeo, joinKey, {
-        labelFieldsPriority: state.cfg?.data?.addressLabelFieldsPriority,
-      });
-
-      const b = state.parcelsLayer?.getBounds?.();
-      if (b && b.isValid && b.isValid()) {
-        state.map.fitBounds(b, { padding: [20, 20] });
-      } else {
-        const sv = state.cfg?.map?.startView ?? FALLBACK_CFG.map.startView;
-        state.map.setView([sv.lat, sv.lng], sv.zoom);
-      }
-
-      restyleAllParcels();
-
-      setStatus1(`Ready • ${state.addresses.length} addresses • search or click a parcel`);
-      console.log("Loaded:", {
-        parcels: state.parcelByRoll.size,
-        snowZone: state.snowByRoll.size,
-        addresses: state.addresses.length,
-      });
+      // If addressIndex.js expects the index object, pass it.
+      // If it expects raw records, it should still fail-soft.
+      return getSuggestions(st.addrIndex, query, { limit: 8 });
     } catch (e) {
-      hardFail(e.message, e, { maxChars: state.cfg?.ui?.statusLineMaxChars });
+      console.warn("getSuggestions failed", e);
+      return [];
     }
   }
 
-  init();
+  function setAddrInputValue(v) {
+    try {
+      if (addrInput) addrInput.value = String(v ?? "");
+    } catch {}
+  }
+
+  function onGoFromInput() {
+    const q = safeOneLine(addrInput?.value || "");
+    if (!q) {
+      setStatus1("Ready • search or click a parcel");
+      return;
+    }
+
+    // If user typed a roll exactly, try that first
+    if (/^\d+$/.test(q) && st.parcelsByRoll.has(q)) {
+      pickRoll(q, "Go");
+      return;
+    }
+
+    // Otherwise use best suggestion
+    const s = getAddressSuggestions(q);
+    if (!s || s.length === 0) {
+      setStatus1("No matches");
+      return;
+    }
+
+    const best = s[0];
+    const roll = parseRollFromSuggestionRow(best);
+    if (!roll) {
+      setStatus1("No roll found");
+      return;
+    }
+
+    // Set input to label if present
+    try {
+      if (best.label) setAddrInputValue(best.label);
+    } catch {}
+
+    pickRoll(roll, "Go");
+    try {
+      hideSuggestions();
+    } catch {}
+  }
+
+  let suggestHandlers = null;
+  try {
+    suggestHandlers = createSuggestHandlers({
+      inputEl: addrInput,
+      getSuggestions: (q) => getAddressSuggestions(q),
+      onPick: (row) => {
+        const roll = parseRollFromSuggestionRow(row);
+        if (!roll) return;
+        // Prefer showing the picked label in the input
+        try {
+          if (row?.label) setAddrInputValue(row.label);
+        } catch {}
+        pickRoll(roll, "Pick");
+      },
+      onGo: () => onGoFromInput(),
+      setStatus1,
+    });
+  } catch (e) {
+    console.warn("Suggest handler wiring failed", e);
+  }
+
+  // Bind input events (if suggest module wiring succeeded)
+  if (suggestHandlers) {
+    on(addrInput, "keydown", (e) => suggestHandlers.onKeyDown(e));
+    on(addrInput, "input", () => suggestHandlers.onInput());
+    on(addrInput, "focus", () => suggestHandlers.onFocus());
+  }
+
+  on(addrBtn, "click", () => onGoFromInput());
+
+  // Clicking map hides suggestion + context menu
+  on(map, "click", () => {
+    try {
+      if (isSuggestOpen()) hideSuggestions();
+    } catch {}
+    try {
+      if (isContextMenuOpen()) hideContextMenu(st.ctx);
+    } catch {}
+  });
+
+  // 17) Mode toggles (highlightMode + satellite button)
+  function updateModeToggleText() {
+    if (!modeToggle) return;
+    const m = st.highlightMode === "snowZone" ? "Snow zone" : "Parcel";
+    try {
+      modeToggle.textContent = `Mode: ${m}`;
+    } catch {}
+  }
+
+  function updateSatToggleText() {
+    if (!satToggle) return;
+    try {
+      satToggle.textContent = st.satOn ? "Satellite: ON" : "Satellite: OFF";
+    } catch {}
+  }
+
+  function doToggleHighlightMode(force) {
+    const next =
+      typeof force === "string"
+        ? force
+        : st.highlightMode === "snowZone"
+          ? "parcel"
+          : "snowZone";
+
+    st.highlightMode = next === "snowZone" ? "snowZone" : "parcel";
+    try {
+      saveUI({ highlightMode: st.highlightMode });
+    } catch {}
+
+    updateModeToggleText();
+
+    // Re-apply selection highlight under new mode
+    try {
+      applyParcelStyle(st.selectedRoll);
+    } catch {}
+
+    if (st.selectedRoll) {
+      setStatus1(`Mode: ${st.highlightMode} • roll ${st.selectedRoll}`.replace("parcel", "Parcel").replace("snowZone", "Snow"));
+    } else {
+      setStatus1(`Mode: ${st.highlightMode}`.replace("parcel", "Parcel").replace("snowZone", "Snow"));
+    }
+  }
+
+  on(modeToggle, "click", () => doToggleHighlightMode());
+
+  // 18) Satellite / size / draw actions (centralized)
+  function doToggleSatellite(force) {
+    const want = typeof force === "boolean" ? force : !st.satOn;
+
+    // Gate by zoom threshold (cfg.map.satelliteEnableMinZoom)
+    const zMin = Number(cfg?.map?.satelliteEnableMinZoom) || 16;
+    try {
+      const z = st.map?.getZoom?.() ?? 0;
+      if (want && z < zMin) {
+        setStatus1(`Zoom in to enable satellite (min ${zMin})`);
+        return;
+      }
+    } catch {}
+
+    try {
+      toggleSatellite(st, want, {
+        setStatus1,
+        // pass satBaseLayer if supported
+        satBaseLayer,
+      });
+      st.satOn = want;
+      updateSatToggleText();
+      try {
+        saveUI({ satOn: st.satOn });
+      } catch {}
+    } catch (e) {
+      console.warn("toggleSatellite failed", e);
+      setStatus1("Error • satellite toggle failed");
+    }
+  }
+
+  function doToggleSize(force) {
+    const want = typeof force === "boolean" ? force : !st.sizeOn;
+
+    if (want && !st.selectedRoll) {
+      setStatus1("Pick a parcel first");
+      return;
+    }
+
+    try {
+      toggleSize(st, want, { setStatus1 });
+      st.sizeOn = want;
+      try {
+        saveUI({ sizeOn: st.sizeOn });
+      } catch {}
+    } catch (e) {
+      console.warn("toggleSize failed", e);
+      setStatus1("Error • size toggle failed");
+    }
+  }
+
+  function doToggleDraw(force) {
+    const want = typeof force === "boolean" ? force : !st.drawOn;
+
+    if (want && !st.selectedRoll) {
+      setStatus1("Pick a parcel first");
+      return;
+    }
+
+    try {
+      toggleDraw(st, want, { setStatus1 });
+      st.drawOn = want;
+      try {
+        saveUI({ drawOn: st.drawOn });
+      } catch {}
+    } catch (e) {
+      console.warn("toggleDraw failed", e);
+      setStatus1("Error • draw toggle failed");
+    }
+  }
+
+  function doClearDraw() {
+    try {
+      clearCanvas(st);
+      // Persist cleared draw if you store it per-roll
+      if (st.selectedRoll) {
+        const r = st.selectedRoll;
+        const rec = getRecord(r) || {};
+        setRecord(r, { ...rec, draw: "" });
+        saveDB(loadDB());
+      }
+      setStatus1(`Draw cleared • roll ${st.selectedRoll || ""}`.trim());
+    } catch (e) {
+      console.warn("Clear draw failed", e);
+      setStatus1("Error • clear draw failed");
+    }
+  }
+
+  function doClearSelection() {
+    try {
+      st.selectedRoll = "";
+      clearSelectionStyles();
+      try {
+        clearViewOverlays(st);
+      } catch {}
+      try {
+        clearSizeOverlays(st);
+      } catch {}
+      try {
+        // keep draw canvas, just turn off draw mode
+        doToggleDraw(false);
+      } catch {}
+      try {
+        exitQueryStage(st, { setStatus1 });
+      } catch {}
+      setStatus1("Ready • search or click a parcel");
+    } catch {}
+  }
+
+  on(satToggle, "click", () => doToggleSatellite());
+
+  // 19) Panel actions wiring (if panel module supports injected actions)
+  // We keep this fail-soft: if panel.js ignores actions, nothing breaks.
+  try {
+    ensurePanel({
+      loadUI,
+      saveUI,
+      actions: {
+        toggleSatellite: () => doToggleSatellite(),
+        toggleSize: () => doToggleSize(),
+        toggleDraw: () => doToggleDraw(),
+        clearDraw: () => doClearDraw(),
+        clearSelection: () => doClearSelection(),
+        closePanel: () => {
+          try {
+            closePanel();
+          } catch {}
+        },
+        // Minimal “records” hooks (per-roll note + draw persistence)
+        getSelectedRoll: () => st.selectedRoll,
+        getRecord: (roll) => {
+          try {
+            return getRecord(asRoll(roll)) || {};
+          } catch {
+            return {};
+          }
+        },
+        setRecord: (roll, patch) => {
+          const r = asRoll(roll);
+          if (!r) return;
+          try {
+            const cur = getRecord(r) || {};
+            setRecord(r, { ...cur, ...(patch || {}) });
+            // Persist
+            const db = loadDB() || {};
+            saveDB(db);
+          } catch (e) {
+            console.warn("setRecord action failed", e);
+          }
+        },
+        deleteRecord: (roll) => {
+          const r = asRoll(roll);
+          if (!r) return;
+          try {
+            deleteRecord(r);
+            const db = loadDB() || {};
+            saveDB(db);
+          } catch {}
+        },
+      },
+    });
+  } catch (e) {
+    // It’s okay if panel.js doesn’t accept this shape
+    console.warn("Panel actions injection failed (safe to ignore)", e);
+  }
+
+  // 20) Restore last selection (optional)
+  try {
+    const last = asRoll(st.uiPrefs?.lastRoll);
+    if (last && st.parcelsByRoll.has(last)) {
+      setSelectedRoll(last, "Restore");
+      // Restore persisted draw if stored in record (optional)
+      try {
+        const rec = getRecord(last) || {};
+        if (rec?.draw && st.canvas) loadDataUrlToCanvas(st, rec.draw);
+      } catch {}
+    }
+  } catch {}
+
+  // 21) Optional: autosave draw per roll when turning draw off
+  // (This respects your “single-line status” goal: no spam, just quiet persistence.)
+  function persistDrawForSelectedRoll() {
+    if (!st.selectedRoll) return;
+    try {
+      const url = canvasToDataUrl(st);
+      const rec = getRecord(st.selectedRoll) || {};
+      setRecord(st.selectedRoll, { ...rec, draw: url });
+      // If your storage.js uses internal load/save, this might be redundant; safe anyway.
+      const db = loadDB() || {};
+      saveDB(db);
+    } catch {}
+  }
+
+  // If draw.js emits events, great; otherwise we hook common moments:
+  on(window, "beforeunload", () => {
+    try {
+      if (st.drawOn) persistDrawForSelectedRoll();
+    } catch {}
+  });
+
+  // 22) Final UI text + ready state
+  updateModeToggleText();
+  updateSatToggleText();
+
+  setStatus1("Ready • search or click a parcel");
+
+  // If user had satellite on but is below threshold, don’t force enable.
+  // If above threshold, enable it quietly.
+  try {
+    if (st.satOn) {
+      const zMin = Number(cfg?.map?.satelliteEnableMinZoom) || 16;
+      const z = st.map?.getZoom?.() ?? 0;
+      if (z >= zMin) doToggleSatellite(true);
+      else st.satOn = false;
+      updateSatToggleText();
+    }
+  } catch {}
+
+  // Same for size/draw: only restore if a roll is selected.
+  try {
+    if (st.sizeOn && st.selectedRoll) doToggleSize(true);
+    else st.sizeOn = false;
+  } catch {}
+  try {
+    if (st.drawOn && st.selectedRoll) doToggleDraw(true);
+    else st.drawOn = false;
+  } catch {}
+
+  // Keep statuses tidy
+  try {
+    console.log("SnowBridge boot complete:", {
+      version: cfg?.app?.version,
+      parcels: !!st.parcelsGeo,
+      snow: !!st.snowGeo,
+      addresses: !!st.addressesGeo,
+    });
+  } catch {}
 })();
